@@ -36,15 +36,14 @@ jobs:
   contracts:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      # The shared test helpers fall back to the canonical Termux temp dir when
-      # TMPDIR is unset, and that path does not exist on a GitHub runner.
-      TMPDIR: '${{ runner.temp }}'
     steps:
       - uses: actions/checkout@v4
       - name: Validate static CI contracts
         run: |
           set -euo pipefail
+          # The shared test helpers fall back to the canonical Termux temp dir
+          # when TMPDIR is unset, and that path does not exist on a runner.
+          export TMPDIR="${RUNNER_TEMP:?}"
           # Pure-static checks: cache-contract parity between producers and
           # consumers, the resumable build-state engine, the CI summary writer
           # and the installer's transactional invariants. They need no runner
