@@ -41,11 +41,19 @@ as-is.
 ## Sandbox limitation
 
 Android does not provide the Linux sandbox primitives expected by the upstream
-CLI. The Android runtime uses the separately supplied `codex-linux-sandbox`
-wrapper, which invokes Termux `proot` for filesystem isolation. It is a
-convenience boundary only: it does not provide network namespaces or strong
-anti-exfiltration guarantees. The native `codex-rs/linux-sandbox` executable
-must not be described as a working Android sandbox.
+CLI, and on this pin the restrictive sandboxes do not run at all: the sandbox
+executable is only discovered by `arg0` under `cfg!(target_os = "linux")`
+(`arg0/src/lib.rs:261`), so on Android `Config::codex_linux_sandbox_exe` stays
+`None`, the key is not settable from TOML, and `sandbox_mode=read-only` or
+`workspace-write` fails every command with
+`LandlockSandboxExecutableNotProvided` (`sandboxing/src/lib.rs` maps
+`SandboxTransformError::MissingLinuxSandboxExecutable` to it). `codex` therefore
+only executes commands unsandboxed (`danger-full-access`) on Termux. The packaged
+`codex-linux-sandbox` is a diagnostic stub that prints a message and exits 78 — it
+does not invoke `proot`, even though Termux ships `proot` and a real wrapper built
+on it is the obvious way to close this gap. The native
+`codex-rs/linux-sandbox` executable must not be described as a working Android
+sandbox.
 
 ## File locks
 
@@ -64,8 +72,10 @@ is single-user. The sites are `execpolicy/src/amend.rs`,
 `message-history/src/{lib,batch}.rs`, `network-proxy/src/certs.rs`,
 `app-server-transport/src/transport/unix_socket.rs`,
 `rollout/src/{maintenance,writer_lock}.rs` (the thread writer lock moved here
-from `thread-store`), `arg0/src/lib.rs`,
-`rmcp-client/src/oauth/{refresh_lock,store_lock}.rs` and
+from `thread-store`), `arg0/src/lib.rs` — both the path-entry guard and the
+`try_lock_dir` janitor site, which had been missed and printed
+`failed to clean up stale arg0 temp dirs: try_lock() not supported` on every
+start — `rmcp-client/src/oauth/{refresh_lock,store_lock}.rs` and
 `user-verification/src/lifecycle_lock.rs` (new in 0.155.1). A new upstream lock
 site will regress silently, so validate a built binary with:
 
@@ -73,10 +83,12 @@ site will regress silently, so validate a built binary with:
 bash codex/test/lock-regression/run.sh /path/to/codex-android
 ```
 
-The harness boots the real app-server against a scripted Responses API stand-in,
-answers a command approval with an execpolicy amendment, and fails if the
-binary reports `lock() not supported`, if no `allow` rule lands in
-`<CODEX_HOME>/rules/default.rules`, or if the approved command does not run.
+The harness boots the real app-server against a scripted Responses API stand-in
+and fails if the binary reports `lock() not supported` or if the turn's command
+does not run. The `rules/default.rules` write is asserted only when the
+app-server actually asks for an approval; under the sandbox situation described
+above it never asks on Android, so that assertion reports `skip` instead of
+passing silently.
 
 ## TLS segment alignment
 

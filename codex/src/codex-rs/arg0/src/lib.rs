@@ -526,10 +526,26 @@ fn try_lock_dir(dir: &Path) -> std::io::Result<Option<File>> {
         Err(err) => return Err(err),
     };
 
-    match lock_file.try_lock() {
-        Ok(()) => Ok(Some(lock_file)),
-        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-        Err(err) => Err(err.into()),
+    // CODEX-TERMUX-ANDROID-PATCH: std::fs::File::try_lock devuelve
+    // ErrorKind::Unsupported en Android/bionic (std solo implementa flock en su propia
+    // lista de targets; verificado hasta 1.98). El janitor elimina directorios *solo*
+    // cuando el lock le demuestra que nadie los usa, así que en Android tratarlo como
+    // adquirido borraría sesiones vivas de otros procesos: se reporta como bloqueado y
+    // ese directorio no se toca. Costo: los `codex-arg0*` de sesiones pasadas se
+    // acumulan; son symlinks + un .lock (~4 KB por sesión), no copias del binario.
+    #[cfg(target_os = "android")]
+    {
+        let _ = lock_file;
+        return Ok(None);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        match lock_file.try_lock() {
+            Ok(()) => Ok(Some(lock_file)),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
     }
 }
 
