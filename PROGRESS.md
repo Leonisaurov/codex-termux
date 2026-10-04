@@ -228,6 +228,11 @@ janitor de `arg0`, así que se publicó `codex-v0.155.1-2` desde `main` con
   `codex-android --version` ya no imprime `try_lock() not supported` —,
   `host-smoke rc=0` y `lock-regression PASS rc=0`.
 
-Queda abierto, no resuelto aquí: si se retira o se marca como obsoleto el release
-`codex-v0.155.1` (sin el fix TLS) y `codex-v0.155.1-1` (sin el fix de `arg0`), y la
-decisión de construir el wrapper real de sandbox sobre `proot`.
+Queda abierto, no resuelto aquí: la decisión de construir el wrapper real de sandbox
+sobre `proot`.
+
+**Limpieza de releases defectuosos (decisión del usuario, 2026-10-04).** Se borraron
+`codex-v0.155.1` (host sin `PT_TLS` alineado) y `codex-v0.155.1-1` (aviso del lock de
+`arg0`), con sus assets. Los tags siguen apuntando a `fc9f366` y `3937e52`, así que
+cada release es recreable si hiciera falta. Publicados quedan solo
+`codex-v0.155.1-2` (latest) y el espejo `rusty-v8-v150.4.0`.
