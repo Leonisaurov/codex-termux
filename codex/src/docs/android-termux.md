@@ -9,8 +9,9 @@ cached copies as a substitute for source changes.
 The supported target is `aarch64-linux-android` with Android API 24. The Rust
 target configuration is in `codex-rs/.cargo/config.toml` and expects the NDK
 tools `aarch64-linux-android-clang` and `llvm-ar` on `PATH`. The code-mode host
-also needs Bionic/Clang runtime stubs supplied by the Android build workflow
-through `CODEX_BIONIC_STUBS_O` and `CODEX_CLANG_RT_BUILTINS`.
+also needs the Bionic libc and compiler-rt stubs that
+`codex/scripts/build-codex-android.sh` compiles and appends through its linker
+wrapper (`android-libc-shims.o` and `libclang_rt.builtins-aarch64-android.a`).
 
 Build and test commands are run from `codex/` unless noted:
 
@@ -76,6 +77,22 @@ The harness boots the real app-server against a scripted Responses API stand-in,
 answers a command approval with an execpolicy amendment, and fails if the
 binary reports `lock() not supported`, if no `allow` rule lands in
 `<CODEX_HOME>/rules/default.rules`, or if the approved command does not run.
+
+## TLS segment alignment
+
+Bionic's arm64 loader refuses an executable whose `PT_TLS` is aligned below 64
+bytes and aborts before `main()` with
+`executable's TLS segment is underaligned: alignment is 8 (skew 0), needs to be
+at least 64 for ARM64 Bionic`. V8 only contributes 8-byte `thread_local`s and
+`thread_local!` lowers to emutls on Android, so nothing in the link raises the
+segment: `codex-rs/code-mode-host/src/main.rs` emits a 64-byte-aligned `.tdata`
+stub through `global_asm!`, and lld takes the segment alignment from the
+best-aligned input section.
+
+Only the code-mode host needs it; `codex-cli` loads fine without the stub, which
+is why the defect stayed invisible until the host was executed. Re-vendoring
+replaces `main.rs` and drops the stub, so the build script verifies `PT_TLS`
+alignment on both ELF outputs and fails otherwise.
 
 ## Model availability
 

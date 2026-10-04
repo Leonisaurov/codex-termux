@@ -132,4 +132,27 @@ cargo build --locked --release --target "$ANDROID_TRIPLE" \
 install -m 0755 "$CODEX_TARGET_DIR/$ANDROID_TRIPLE/release/codex" "$CODEX_OUT"
 install -m 0755 "$CODEX_TARGET_DIR/$ANDROID_TRIPLE/release/codex-code-mode-host" "$CODEX_HOST_OUT"
 install -m 0755 "$SCRIPT_DIR/codex-linux-sandbox" "$CODEX_SANDBOX_OUT"
+
+# Bionic's arm64 loader refuses an executable whose PT_TLS is aligned below 64 bytes,
+# and it aborts before main() with "executable's TLS segment is underaligned". V8 only
+# contributes 8-byte thread_locals, so the code-mode host needs the .tdata stub that the
+# vendored source carries. The failure appears on the device, never here: verify it at
+# build time so a re-vendor that drops the stub breaks CI instead of shipping a dead host.
+verify_tls_alignment() {
+    local bin="$1" field align
+    field="$(readelf -lW "$bin" | awk '/^[[:space:]]*TLS[[:space:]]/ { print $NF; exit }')"
+    if [ -z "$field" ]; then
+        echo "  TLS: sin segmento PT_TLS ($bin)"
+        return 0
+    fi
+    align="$((field))" # readelf imprime 0x40; el aritmético de bash acepta hex y decimal.
+    if [ "$align" -lt 64 ]; then
+        echo "ERROR: $bin: PT_TLS alineado a $align, bionic/arm64 requiere >= 64" >&2
+        echo "       Falta el stub TLS del puerto (code-mode-host/src/main.rs)." >&2
+        return 1
+    fi
+    echo "  TLS: PT_TLS alineado a $align ($bin)"
+}
+verify_tls_alignment "$CODEX_OUT"
+verify_tls_alignment "$CODEX_HOST_OUT"
 echo "Codex outputs: $CODEX_OUT and $CODEX_HOST_OUT"

@@ -1,3 +1,23 @@
+// CODEX-TERMUX-ANDROID-PATCH: Stub TLS alineado a 64: bionic ARM64 exige el PT_TLS con
+// p_align >= 64 y p_vaddr % 64 == 0 (skew 0). V8 trae thread_local con alineación 8; sin
+// este stub el segmento TLS nace infra-alineado y linker64 aborta ("executable's TLS
+// segment is underaligned") antes del main. Rust stable no puede emitir .tdata nativo
+// (thread_local! -> emutls en android), de ahí el asm. Verificado: un input .tdata con
+// .p2align 6 hace que lld emita p_align 0x40.
+// CODEX-TERMUX-ANDROID-PATCH-END
+core::arch::global_asm!(
+    ".section .tdata,\"awT\",@progbits",
+    ".p2align 6",
+    "tls_align_stub:",
+    ".fill 64, 1, 0x2a",
+    ".previous",
+);
+unsafe extern "C" {
+    fn tls_align_stub() -> i32;
+}
+#[used]
+static TLS_ALIGN_STUB_ANCHOR: unsafe extern "C" fn() -> i32 = tls_align_stub;
+
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
