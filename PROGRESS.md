@@ -41,6 +41,20 @@ Comparación `git ls-files -s codex` entre `opencode-termux@12d2c97` y este repo
 - Run `37189092590` (push a `main`): `contracts` y `rusty-v8 / build-android` en
   verde. El log del job imprime `Restored Rusty V8 from release rusty-v8-v150.4.0`,
   así que el release espejado evita el build de V8 desde fuente.
+- Cierre de esa misma run en verde: `Validate Codex outputs for durable cache`,
+  `Save Codex durable artifacts` y `Upload Codex binaries` en `success`, con el
+  artifact `codex-android-aarch64-be2951ea34f0d295ed0becf97079f92fa5f6950e` de
+  391842279 bytes (ID 11298803340).
+- Run `37191620271` (segunda corrida): `Cache hit for:
+  ci-cache-v2-codex-eb4660af53126ae739d98b2f0786b867f666d9199a5644c29c1c444f73610cb1-artifact`
+  (337 MB restaurados) y `Cache restored from key: ci-cache-v2-toolchain-Linux-X64-
+  ndk-28.1.13356709-api-24` (650 MB). El paso de compilación quedó `skipped` porque
+  los artifacts durables ya estaban en cache: la incrementalidad funciona dentro del
+  repo nuevo.
+- El digest del contrato es **el mismo que calculaba el stack**: la corrida vieja
+  `35683166526` de `build-codex.yml` usaba `ci-cache-v2-codex-eb4660af53126ae739d98
+  b2f0786b867f666d919…`. La extracción no alteró la identidad del contrato, solo el
+  espacio de nombres de cache (por repositorio).
 
 ## Ensayo local del tramo publish → install (2026-10-04)
 
