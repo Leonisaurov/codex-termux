@@ -23,12 +23,16 @@ def sse(events):
 
 
 def tool_call_body(command, call_id="call-1"):
-    args = json.dumps({"command": command, "workdir": None, "timeout_ms": None})
+    # El tool de shell en el pin vendeoreado se llama `exec_command` con `cmd`
+    # (core/src/tools/handlers/shell_spec.rs:96). `shell_command`/`command` fueron
+    # nombres de releases viejos: el router responde "unsupported call" y la
+    # aprobación nunca se pide.
+    args = json.dumps({"cmd": command, "tty": False})
     return sse([
         {"type": "response.created", "response": {"id": "resp-1"}},
         {"type": "response.output_item.done",
          "item": {"type": "function_call", "call_id": call_id,
-                  "name": "shell_command", "arguments": args}},
+                  "name": "exec_command", "arguments": args}},
         {"type": "response.completed",
          "response": {"id": "resp-1", "usage": {"input_tokens": 0, "input_tokens_details": None,
                                                 "output_tokens": 0, "output_tokens_details": None,

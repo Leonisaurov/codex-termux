@@ -83,15 +83,125 @@ CI ni releases):
   dentro del staging (`os.replace`, con `copy2` de reserva si hay `EXDEV`): el pico
   baja a ~2.0 GB y la instalación termina.
 
-## Defecto preexistente: `codex-code-mode-host` no arranca en Bionic
+## Causa raíz: `codex-code-mode-host` no arrancaba en Bionic (2026-10-04)
 
-- `codex-code-mode-host --help` aborta con `executable's TLS segment is underaligned:
+- `codex-code-mode-host --help` abortaba con `executable's TLS segment is underaligned:
   alignment is 8 (skew 0), needs to be at least 64 for ARM64 Bionic`.
 - No lo causó la extracción: el artifact `codex-android-aarch64-be2951ea…` de la
   corrida vieja `35683166526` del repositorio del stack falla **idénticamente**, y el
   `codex-code-mode-host` publicado en `stack-v1.18.11` (commit `fee9a8d5…`) sí arranca
   y devuelve su `Usage:`. La rotura entró con el rebase a `rust-v0.155.1`, antes de
   separar los repositorios; `codex-android` no la padece.
-- Queda como trabajo propio de este repo: corregir el alineado TLS del enlace de
-  `codex-code-mode-host` en `codex/scripts/build-codex-android.sh` y verificarlo con
-  `--help` en dispositivo.
+- Comparando los dos ELF (`readelf -lW` / `-sW`, mismo binario descargado de cada
+  release):
+
+  | build | `.tdata` | `.tbss` | `PT_TLS p_align` | símbolo |
+  |---|---|---|---|---|
+  | `fee9a8d5` (funciona) | 0x44, algn **64** | 0xd8, algn 8 | **0x40** | `tls_align_stub` presente |
+  | `be2951ea` (roto) | 0x04, algn 4 | 0xd8, algn 8 | **0x8** | sin `tls_align_stub` |
+
+  El puerto llevaba en `codex-rs/code-mode-host/src/main.rs` un `global_asm!` que emite
+  64 bytes en `.tdata` con `.p2align 6`; lld toma la alineación del segmento de la
+  sección mejor alineada, así que ese stub es lo que producía `p_align` 0x40. El
+  re-vendor sobreescribió `main.rs` con el de upstream y **barrió el parche sin dejar
+  marcador**: el inventario de `CODEX-TERMUX-ANDROID-PATCH` no lo cubría porque el stub
+  no lo usaba. El `commit 12d2c97` re-aplicó las cfgs de sandbox pero no este bloque.
+- Verificado en el dispositivo antes de tocar nada: un `.tdata` con `.p2align 6` hace
+  que lld emita `PT_TLS` con `p_align` 0x40 (binario C mínimo, ejecutado con éxito);
+  sin segmento TLS también carga, así que el gate solo aplica cuando existe `PT_TLS`.
+- Fix (`3937e52`): se re-aplica el stub **verbatim** sobre el `main.rs` de 0.155.1,
+  ahora con marcador `CODEX-TERMUX-ANDROID-PATCH`, y `codex/scripts/build-codex-android.sh`
+  valida `PT_TLS >= 64` en las dos salidas ELF — el tripwire rechaza el binario roto y
+  acepta el bueno, comprobado localmente contra ambos. Documentado en
+  `codex/src/docs/android-termux.md` (§ TLS segment alignment).
+- Pendiente de cerrar con la corrida en curso: build verde, release publicada con el
+  fix, e instalación real con `codex-code-mode-host --help` devolviendo su `Usage:`.
+
+
+## Huella de cache tras la extracción (2026-10-04)
+
+Medida con `gh api repos/<repo>/actions/caches` (solo lectura):
+
+- `Leonisaurov/opencode-termux`: `total_count=0`. GitHub ya podó por LRU de 7 días
+  todas las claves del stack y de Codex (la última corrida ahí fue el 2026-09-22), así
+  que la extracción no dejó cache huérfana que servir un artifact roto ni cuota
+  ocupada; no hay nada que podar a mano.
+- `Leonisaurov/codex-termux`: 7 entradas, ~2.77 GiB de los 10 GiB. `toolchain`
+  (650 MiB), `rusty-v8` (35 + 29 + 29 MiB), el final del contrato viejo (337 MiB) y
+  el de compilador (1.69 GiB, tocado durante la corrida del fix).
+- El `ci-cache-v2-codex-compiler-…` renace con prefijo de la contract-key anterior
+  (`restore-prefix`), por lo que un cambio en `codex/src` no es una compilación fría:
+  restaura objetos y solo recompila lo alcanzado por el parche.
+
+## Aislamiento entre los dos instaladores (2026-10-04)
+
+Invariante del plan: un manifiesto del stack nunca puede alimentarse al instalador
+de Codex ni al revés. Probada con los manifiestos **publicados** de ambos repos
+(`stack-v1.18.11` → `opencode-termux.stack/v1` con 5 componentes; `codex-v0.155.1`
+→ `codex-termux/v1` con 1), cruzados con `--manifest … --all --dry-run`:
+
+- instalador de Codex + manifiesto del stack ⇒ `rc=1`, `schema de manifiesto no soportado`;
+- instalador del stack + manifiesto de Codex ⇒ `rc=1`, el mismo rechazo.
+
+Además `installer.py --just codex` en el repo del stack falla con
+`invalid choice: 'codex' (choose from 'bun', 'opentui', 'opencode', 'kilo')`, que es
+la señal de retirada esperada. Se comprobó también que `download()` es código
+idéntico en los dos repos: el `FileNotFoundError` que produce un `--manifest` local
+cuyo `.tar.gz` no está junto al manifiesto es comportamiento heredado compartido
+(la validación descarga y desenvasa de verdad), no un defecto de la extracción.
+Nota: `stack-v1.18.11` conserva su componente `codex` — es historia publicada, no
+un re-cableado.
+
+## Release verificado en dispositivo y dos defectos que aparecieron al verificarlo (2026-10-04)
+
+**`codex-v0.155.1-1` publicado y bueno donde estaba roto.** Run `37211704073` (push del
+fix TLS) verde: el build imprimió `TLS: sin segmento PT_TLS (codex-android)` y
+`TLS: PT_TLS alineado a 64 (codex-code-mode-host)`. Run de publicación `37213433702`
+verde con los 5 jobs y release `codex-v0.155.1-1` (383 MB + manifest
+`codex-termux/v1`, 1 componente). Instalación real con `install.sh` contra ese release:
+`rc=0` con checksum y ELF validados, y en el árbol instalado
+`PT_TLS codex-android = ninguno`, `PT_TLS codex-code-mode-host = 0x40`.
+`codex/test/host-smoke/run.sh` ⇒ **OK**: `--help` responde desde clap y el arranque
+real por `stdio://` llega a `main()` sin intervención del loader. Ese era el defecto
+que había que cerrar.
+
+**Sitio de lock que faltaba (`arg0::try_lock_dir`).** `codex-android --version`
+imprimía `WARNING: failed to clean up stale arg0 temp dirs: try_lock() not supported`
+en cada arranque: el parche de `arg0/src/lib.rs` cubría el guard de path-entry pero
+no el janitor. No es inocuo — en `~/.codex/tmp/arg0` hay 6 `codex-arg0*` de sesiones
+pasadas que nunca se limpian. Se corrigió devolviendo `Ok(None)` bajo
+`target_os = "android"` (el janitor solo borra cuando el lock le prueba que nadie usa
+el directorio; tratarlo como adquirido borraría sesiones vivas). Costo aceptado: los
+directorios de sesiones pasadas se acumulan, y son symlinks + un `.lock` (~4 KB por
+sesión, medido), no copias del binario de 1.43 GB.
+
+**El sandbox restrictivo no funciona en este puerto (hallazgo, no introducido aquí).**
+Con `sandbox_mode=read-only` cada comando aborta con
+`LandlockSandboxExecutableNotProvided`: la ruta al ejecutable de sandbox la provee
+`arg0` solo bajo `cfg!(target_os = "linux")` (`arg0/src/lib.rs:261`) y la clave
+`codex_linux_sandbox_exe` no es configurable desde TOML, así que en Android queda
+`None`. El `codex-linux-sandbox` empaquetado es un stub diagnóstico (imprime y
+`exit 78`) — nunca invoca `proot`, aunque Termux lo tiene instalado
+(`$PREFIX/bin/proot`, sin `bwrap`). Historia: el stub es idéntico desde `f47bb02` del
+repo viejo, o sea que es una limitación del puerto, no una regresión de la extracción
+ni del rebase. Consecuencia práctica: en Termux `codex` solo ejecuta comandos sin
+sandbox. Cerrarlo de verdad significa escribir el wrapper sobre `proot` (o extender
+`arg0` a `any(linux, android)` y seleccionar el helper), y eso cambia la postura de
+aislamiento: queda como decisión del usuario, documentada en
+`codex/src/docs/android-termux.md`.
+
+**El harness de lock-regression estaba podado contra este pin** y por eso el fallo
+inicial se leyó como regresión de producto. Dos cosas: `approval_policy="untrusted"`
+lo rechaza upstream 0.155.1 y mata el app-server (`validate_config`), y el tool call
+de juguete usaba `shell_command`/`command`, nombre y esquema viejos — hoy es
+`exec_command` con `cmd` (`core/src/tools/handlers/shell_spec.rs:96`). Con eso
+arreglado el app-server arranca y el comando del turno se ejecuta. La aserción de
+`rules/default.rules` ahora es condicional: solo falla si el app-server pidió
+aprobación; sin sandbox no hay denegación que escalar, así que informa `skip` en vez
+de pasar fingiendo cobertura. Resultado con el binario instalado: **PASS**
+(`ok: no 'lock() not supported'`, `skip: rules/default.rules …`, `ok: approved command
+executed -> hola`, `rc=0`).
+
+Refuerzo: `ci/scripts/test-vendored-android-patches.py` pasa de revisar solo el stub
+TLS a exigir el marcador en 14 archivos críticos (incluido `arg0/src/lib.rs`) y un
+piso de 29 marcadores en el árbol, corre en 1.2 s y está cableado en `contracts`.

@@ -50,6 +50,7 @@ jobs:
           # setup and guard the product before any expensive job.
           for test in \
             test-workflow-cache-contracts \
+            test-vendored-android-patches \
             test-build-state \
             test-ci-summary \
             test-installer; do

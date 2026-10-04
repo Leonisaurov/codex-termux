@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Drive a Codex `app-server` (stdio JSONL) and answer a command approval with an
-execpolicy amendment, to check whether `<CODEX_HOME>/rules/default.rules` gets
-written. Used by `run.sh`; see README.md in this directory."""
+"""Drive a Codex `app-server` (stdio JSONL) through a real turn that executes a
+command, so the Android file-lock paths of startup and of the turn are exercised.
+Used by `run.sh`; see README.md in this directory. If the app-server ever asks for
+a command approval, this probe answers with an execpolicy amendment."""
 import json
 import os
 import subprocess
@@ -23,7 +24,14 @@ cfg = [
     "-c", f'model_providers.fake={{name="Fake",base_url="http://127.0.0.1:{PORT}/v1",wire_api="responses",requires_openai_auth=false}}',
     "-c", "model_provider=fake",
     "-c", "model=fake-model",
-    "-c", "approval_policy=untrusted",
+    # CODEX-TERMUX-ANDROID-PATCH: upstream 0.155.1 rechaza approval_policy="untrusted" en
+    # cualquier config validada (app-server/src/config_manager_service.rs:validate_config),
+    # fijarla mata el arranque del app-server. Y en Android ningún modo restrictivo puede
+    # ejecutarse: el exe de sandbox lo provee arg0 solo bajo cfg!(target_os = "linux")
+    # (arg0/src/lib.rs:261), así que read-only/workspace-write abortan con
+    # LandlockSandboxExecutableNotProvided antes de pedir aprobación. Queda
+    # danger-full-access, que es el modo en que este puerto realmente corre comandos; lo que
+    # se ejercita aquí son los caminos de lock del arranque y del turno, no la escalada.
     "-c", "sandbox_mode=danger-full-access",
     "-c", "analytics.enabled=false",
     "-c", "hide_agent_reasoning=true",

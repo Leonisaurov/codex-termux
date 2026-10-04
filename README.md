@@ -48,7 +48,7 @@ publica.
 Chequeos estáticos, sin runner:
 
 ```sh
-for t in test-workflow-cache-contracts test-build-state test-ci-summary test-installer; do
+for t in test-workflow-cache-contracts test-vendored-android-patches test-build-state test-ci-summary test-installer; do
   python3 "ci/scripts/$t.py"
 done
 ```
@@ -57,6 +57,37 @@ Cambios en `ci/scripts/cache-contract.py`, `build-state.py`,
 `validate-source-tree.py`, `validate-android-bundle.py` o
 `ci/actions/incremental-cache/action.yml` invalidan todas las claves de cache:
 son `ENGINE_PATHS` del contrato.
+
+El contrato del producto hashea el árbol `codex/src` completo —no solo
+`codex-rs`—, así que hasta un comentario en `codex/src/docs` cambia la clave y
+fuerza una recompilación desde cero. Para probar un cambio de docs sin pagar
+ese coste, hacerlo en `README.md` o en `ci/`.
+
+## Pruebas en dispositivo
+
+```sh
+bash codex/test/lock-regression/run.sh "$PREFIX/bin/codex-android"
+bash codex/test/host-smoke/run.sh "$PREFIX/bin/codex-code-mode-host"
+```
+
+La primera arranca el `app-server` real contra un Responses API de juguete y
+verifica los parches de `File::lock` sobre un turno que ejecuta un comando; la
+persistencia de `rules/default.rules` solo se asevera si el server pidió una
+aprobación, y en Android no la pide porque no hay sandbox restrictivo. La segunda es
+lo que ningún chequeo de build puede probar: que el host sobrevive al loader
+dinámico de Bionic y llega a `main()` (un `PT_TLS` mal alineado, un símbolo
+ausente o un archivo V8 incompatible matan el binario en el dispositivo, no en
+el runner).
+
+## Limitación de sandbox
+
+En este pin los modos restrictivos (`read-only`, `workspace-write`) no pueden
+ejecutar comandos en Android: `arg0` solo inyecta la ruta del ejecutable de sandbox
+bajo `cfg!(target_os = "linux")` y esa clave no se fija desde TOML, así que cada
+comando aborta con `LandlockSandboxExecutableNotProvided`. El `codex-linux-sandbox`
+publicado es un stub diagnóstico (`exit 78`), no un wrapper de `proot`. En la práctica
+`codex` aquí corre sin sandbox; `codex/src/docs/android-termux.md` detalla qué haría
+falta para cerrar la brecha.
 
 ## Instalación en Termux
 
