@@ -205,3 +205,29 @@ executed -> hola`, `rc=0`).
 Refuerzo: `ci/scripts/test-vendored-android-patches.py` pasa de revisar solo el stub
 TLS a exigir el marcador en 14 archivos críticos (incluido `arg0/src/lib.rs`) y un
 piso de 29 marcadores en el árbol, corre en 1.2 s y está cableado en `contracts`.
+
+## Release `0.155.1-2`: los dos fixes confirmados en dispositivo (2026-10-04)
+
+El release anterior (`codex-v0.155.1-1`) lleva el stub TLS pero **no** el parche del
+janitor de `arg0`, así que se publicó `codex-v0.155.1-2` desde `main` con
+`7aee792`/`9356ab1` adentro.
+
+- Run de push `37216217817` verde (`contracts`, `rusty-v8`, `build-codex`):
+  `TLS: PT_TLS alineado a 64 (…/codex-code-mode-host)` y restore del cache de
+  compilador con 1 699 MB calientes.
+- Run de publicación `37218638462` verde y **rápido** (8 min):
+  `Cache hit for: ci-cache-v2-codex-7ad39a051…-artifact`, o sea que el artefacto
+  publicado es el mismo binario que el run de push validó — la identidad del contrato
+  se mantiene dentro del repo nuevo (primera corrida: miss; segunda: hit).
+- Release `codex-v0.155.1-2`: `manifest.json` con `"schema": "codex-termux/v1"`,
+  `release: 0.155.1-2`, 1 componente, asset de 383 321 670 B y sha256
+  `a898c96b…`.
+- Verificación real en dispositivo contra ese release (`install.sh` + los dos
+  harness): `instalador rc=0`, `PT_TLS codex-android = ninguno`,
+  `PT_TLS codex-code-mode-host = 0x40`, `arg0-janitor OK (sin avisos de lock)` —
+  `codex-android --version` ya no imprime `try_lock() not supported` —,
+  `host-smoke rc=0` y `lock-regression PASS rc=0`.
+
+Queda abierto, no resuelto aquí: si se retira o se marca como obsoleto el release
+`codex-v0.155.1` (sin el fix TLS) y `codex-v0.155.1-1` (sin el fix de `arg0`), y la
+decisión de construir el wrapper real de sandbox sobre `proot`.
