@@ -13,6 +13,11 @@ viajaron sin editar, por lo que el contrato de cache conserva los mismos digests
   estático en vez de recompilar V8 (~110 min).
 - Las caches de Actions son por repositorio: la primera corrida de cada clave es
   `miss` legítimo, no una regresión.
+- La caché local de `cargo` (`codex/src/codex-rs/target`, 1.9 G) y `.vscode`
+  se trasladaron con `mv` (rename en el mismo dispositivo) desde el repo del
+  stack, así que los builds en dispositivo siguen donde vive el producto. Sus
+  fingerprints de cargo se invalidan al cambiar de ruta; el valor del traslado es
+  liberar el repo viejo, no reutilizar objetos.
 
 Nada de lo anterior se declara funcional hasta leer el log de la run y listar los
 artifacts y releases publicados.
@@ -27,6 +32,9 @@ Comparación `git ls-files -s codex` entre `opencode-termux@12d2c97` y este repo
   pasó a derivar de `tempfile.gettempdir()` (`run.sh` lo sobreescribe siempre).
 - Tree de la fuente: `ceabd0d75e1cd0851e4746d8c576ef6cd021810d` en ambos lados,
   que es exactamente el input del contrato de cache de `build-codex.yml`.
+- El mismo tree está confirmado en el **remoto**: `main` = `4fb96c403c8ede2a70b390d359b99c20df03c151`
+  y `codex/src` = `ceabd0d7…` leído con `gh api …/git/trees/…`, así que la
+  identidad no depende del worktree local.
 
 ## Gates de CI leídas en log
 
