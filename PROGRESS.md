@@ -68,3 +68,30 @@ CI ni releases):
 - Rechazo cruzado de esquemas: el instalador de este repo rechaza un manifiesto
   `opencode-termux/stack/v1` y el del stack rechaza uno `codex-termux/v1`, ambos con
   `schema de manifiesto no soportado` y código 1.
+
+## Release publicado y validado en dispositivo (2026-10-04)
+
+- Run `37191642794` (`workflow_dispatch`, `release=0.155.1`): `success`. Release
+  `codex-v0.155.1` con `manifest.json` (schema `codex-termux/v1`) y
+  `codex-be2951ea…-android-aarch64.tar.gz` de 383301367 bytes; el `sha256` del asset
+  descargado coincide con el del manifiesto (`43fa15e974bc6fa7…`).
+- Instalación real con `--prefix` bajo `$TMPDIR`: `codex-cli 0.155.1`, código 0,
+  `ELF 64-bit LSB pie executable, ARM aarch64`.
+- El instalador copiaba cada fichero extraído a `payload/` antes de moverlo, así que
+  pedía ~3.7 GB libres para un producto que ocupa 1.65 GB (`codex-android` son
+  1.43 GB sin comprimir) y abortaba con `ENOSPC` en este dispositivo. Ahora mueve
+  dentro del staging (`os.replace`, con `copy2` de reserva si hay `EXDEV`): el pico
+  baja a ~2.0 GB y la instalación termina.
+
+## Defecto preexistente: `codex-code-mode-host` no arranca en Bionic
+
+- `codex-code-mode-host --help` aborta con `executable's TLS segment is underaligned:
+  alignment is 8 (skew 0), needs to be at least 64 for ARM64 Bionic`.
+- No lo causó la extracción: el artifact `codex-android-aarch64-be2951ea…` de la
+  corrida vieja `35683166526` del repositorio del stack falla **idénticamente**, y el
+  `codex-code-mode-host` publicado en `stack-v1.18.11` (commit `fee9a8d5…`) sí arranca
+  y devuelve su `Usage:`. La rotura entró con el rebase a `rust-v0.155.1`, antes de
+  separar los repositorios; `codex-android` no la padece.
+- Queda como trabajo propio de este repo: corregir el alineado TLS del enlace de
+  `codex-code-mode-host` en `codex/scripts/build-codex-android.sh` y verificarlo con
+  `--help` en dispositivo.

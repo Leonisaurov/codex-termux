@@ -207,7 +207,10 @@ def main() -> None:
                 dest = {"codex":"bin/codex-android"}[n]
                 for f in c["files"]:
                     target = dest if f == c["files"][0] else f"bin/{f}"
-                    target_path = payload / target; target_path.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(ext / f, target_path); target_path.chmod(0o755)
+                    target_path = payload / target; target_path.parent.mkdir(parents=True, exist_ok=True)
+                    try: os.replace(ext / f, target_path)
+                    except OSError: shutil.copy2(ext / f, target_path)
+                    target_path.chmod(0o755)
             if args.dry_run: print("Dry-run válido.", file=sys.stderr); return
             prefix = pathlib.Path(args.prefix); backup = pathlib.Path(tempfile.mkdtemp(prefix="codex-backup.", dir=tmp)); moved=[]
             smoke_failures = []
