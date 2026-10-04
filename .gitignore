@@ -1,0 +1,42 @@
+# Product-owned generated state (sources remain visible to Git).
+*/build/
+*/artifacts/
+*/dist/
+*/deps-android/
+# Shared, ignored CI tool state (e.g. the single Android NDK cache path).
+.ci/
+# Historical names must not reappear at the repository root.
+codex-src/
+build/
+dist/
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.pkg.tar.xz
+*.deb
+*.zip
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Python test/runtime bytecode
+__pycache__/
+ci/zram.ko.zst
+*.py[cod]
+
+# Temporary files
+tmp/

@@ -1,0 +1,25 @@
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "link-arg=/STACK:8388608", "-C", "target-feature=+crt-static"]
+
+# MSVC emits a warning about code that may trip "Cortex-A53 MPCore processor bug #843419" (see
+# https://developer.arm.com/documentation/epm048406/latest) which is sometimes emitted by LLVM.
+# Since Arm64 Windows 10+ isn't supported on that processor, it's safe to disable the warning.
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608", "-C", "link-arg=/arm64hazardfree"]
+
+[target.'cfg(all(windows, target_env = "gnu"))']
+rustflags = ["-C", "link-arg=-Wl,--stack,8388608"]
+
+# CODEX-TERMUX-ANDROID-PATCH: the Android port builds with the NDK toolchain
+# exposed on PATH by the CI workflow instead of a Rust-bundled linker.
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android-clang"
+ar = "llvm-ar"
+rustflags = [
+    "-C", "target-feature=-crt-static",
+    "-C", "split-debuginfo=off",
+    "-C", "debuginfo=line-tables-only",
+    "-C", "force-frame-pointers=yes",
+    "-C", "link-args=-Wl,--build-id=none",
+    "-C", "link-args=-fuse-ld=lld",
+]

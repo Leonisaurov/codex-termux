@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Codex's desktop Linux sandbox is not part of the Android/Termux runtime.
+# Keep a deterministic helper in the release so callers receive an explicit
+# diagnostic instead of an absent executable.
+echo "codex-linux-sandbox: el sandbox Linux no está disponible en Android/Termux" >&2
+exit 78
