@@ -1,0 +1,104 @@
+name: Build and publish Codex (Android aarch64)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'codex/**'
+      - 'ci/**'
+      - 'releases/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Versión del tag codex-v<release>'
+        required: true
+        default: '0.155.1'
+      codex_ref:
+        description: 'Commit vendeoreado de openai/codex (debe igualar ci/source-manifest.json)'
+        required: true
+        default: 'be2951ea34f0d295ed0becf97079f92fa5f6950e'
+      v8_version:
+        description: 'Versión de rusty_v8 compatible con codex-code-mode-host'
+        required: true
+        default: '150.4.0'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-release-${{ github.event.inputs.release || github.ref }}
+  # Let an active build publish its recovery checkpoints; newer pending runs
+  # still supersede older pending runs in this concurrency group.
+  cancel-in-progress: false
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate static CI contracts
+        run: |
+          set -euo pipefail
+          # Pure-static checks: cache-contract parity between producers and
+          # consumers, the resumable build-state engine, the CI summary writer
+          # and the installer's transactional invariants. They need no runner
+          # setup and guard the product before any expensive job.
+          for test in \
+            test-workflow-cache-contracts \
+            test-build-state \
+            test-ci-summary \
+            test-installer; do
+            echo ">>> $test"
+            python3 "ci/scripts/$test.py"
+          done
+
+  rusty-v8:
+    needs: contracts
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build-rusty-v8-android.yml
+    with:
+      v8_version: ${{ inputs.v8_version || '150.4.0' }}
+    secrets: inherit
+
+  codex:
+    needs: [contracts, rusty-v8]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build-codex.yml
+    with:
+      use_existing_v8: true
+      codex_ref: ${{ inputs.codex_ref || 'be2951ea34f0d295ed0becf97079f92fa5f6950e' }}
+      v8_version: ${{ inputs.v8_version || '150.4.0' }}
+    secrets: inherit
+
+  publish:
+    needs: [contracts, codex]
+    if: ${{ github.event_name == 'workflow_dispatch' && always() && needs.contracts.result == 'success' && needs.codex.result == 'success' }}
+    permissions:
+      contents: write
+      actions: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-input
+      - name: Verify the producer and create the manifest
+        env:
+          RELEASE: ${{ inputs.release || '0.155.1' }}
+          CODEX_REF: ${{ inputs.codex_ref || 'be2951ea34f0d295ed0becf97079f92fa5f6950e' }}
+        run: |
+          set -euo pipefail
+          test -d release-input
+          python3 ci/scripts/package-release.py --root release-input --out release-output --release "$RELEASE" --codex "$CODEX_REF"
+      - name: Publish immutable release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: codex-v${{ inputs.release || '0.155.1' }}
+          name: codex-termux ${{ inputs.release || '0.155.1' }}
+          files: release-output/*
+          make_latest: true
+          fail_on_unmatched_files: true

@@ -1,0 +1,108 @@
+name: Incremental cache
+description: Restore validated outputs or reusable intermediates, or save a resumable checkpoint.
+
+inputs:
+  mode:
+    description: restore-final, restore-intermediate, restore-checkpoint, save-final, save-intermediate, or save-checkpoint
+    required: true
+  key:
+    description: Immutable cache key for a validated output.
+    required: false
+  path:
+    description: Paths belonging to the immutable output cache.
+    required: false
+  checkpoint-prefix:
+    description: Prefix shared by resumable checkpoints for this contract.
+    required: false
+  checkpoint-path:
+    description: Paths belonging to the resumable checkpoint.
+    required: false
+  restore-prefix:
+    description: Prefix used to find the latest compatible intermediate cache.
+    required: false
+
+outputs:
+  cache-hit:
+    description: true when an exact final or intermediate cache was restored.
+    value: ${{ steps.restore-final.outputs.cache-hit || steps.restore-intermediate.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate cache mode and paths
+      shell: bash
+      env:
+        CACHE_MODE: ${{ inputs.mode }}
+        CACHE_KEY: ${{ inputs.key }}
+        CACHE_PATH: ${{ inputs.path }}
+        CHECKPOINT_PREFIX: ${{ inputs.checkpoint-prefix }}
+        CHECKPOINT_PATH: ${{ inputs.checkpoint-path }}
+        RESTORE_PREFIX: ${{ inputs.restore-prefix }}
+      run: |
+        set -euo pipefail
+        case "$CACHE_MODE" in
+          restore-final|save-final|restore-intermediate|save-intermediate)
+            test -n "$CACHE_KEY" || { echo 'incremental-cache: key is required' >&2; exit 2; }
+            test -n "$CACHE_PATH" || { echo 'incremental-cache: path is required' >&2; exit 2; }
+            if [ "$CACHE_MODE" = restore-intermediate ]; then
+              test -n "$RESTORE_PREFIX" || { echo 'incremental-cache: restore-prefix is required for intermediate restore' >&2; exit 2; }
+            fi
+            ;;
+          restore-checkpoint|save-checkpoint)
+            test -n "$CHECKPOINT_PREFIX" || { echo 'incremental-cache: checkpoint-prefix is required' >&2; exit 2; }
+            test -n "$CHECKPOINT_PATH" || { echo 'incremental-cache: checkpoint-path is required' >&2; exit 2; }
+            ;;
+          *)
+            echo "incremental-cache: unsupported mode: $CACHE_MODE" >&2
+            exit 2
+            ;;
+        esac
+
+    - name: Restore exact validated output
+      id: restore-final
+      if: ${{ inputs.mode == 'restore-final' }}
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+
+    - name: Restore latest resumable checkpoint
+      id: restore-checkpoint
+      if: ${{ inputs.mode == 'restore-checkpoint' }}
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ inputs.checkpoint-path }}
+        key: ${{ inputs.checkpoint-prefix }}${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          ${{ inputs.checkpoint-prefix }}
+
+    - name: Restore compatible build intermediates
+      id: restore-intermediate
+      if: ${{ inputs.mode == 'restore-intermediate' }}
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+        restore-keys: |
+          ${{ inputs.restore-prefix }}
+
+    - name: Save validated output
+      if: ${{ inputs.mode == 'save-final' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+
+    - name: Save build intermediates
+      if: ${{ inputs.mode == 'save-intermediate' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+
+    - name: Save resumable checkpoint
+      if: ${{ inputs.mode == 'save-checkpoint' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ inputs.checkpoint-path }}
+        key: ${{ inputs.checkpoint-prefix }}${{ github.run_id }}-${{ github.run_attempt }}

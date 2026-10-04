@@ -1,0 +1,510 @@
+# build-rusty-v8-android.yml
+#
+# Genera y publica el artefacto `librusty_v8` para `aarch64-linux-android` que
+# necesita el crate `codex-code-mode-host` del port Android de Codex (runtime
+# companion con V8 embebido para el modo code).
+#
+# Por qué existe: el crate `v8 = "=150.4.0"` (rusty_v8, feature
+# `v8_enable_sandbox` → sufijo `ptrcomp_sandbox`) NO tiene prebuilt para
+# `aarch64-linux-android` (solo linux/darwin/windows). Con `V8_FROM_SOURCE=1`
+# el build.rs de rusty_v8 compila V8 desde fuente (GN + clang + NDK r26c que
+# descarga SOLO para host linux-x86_64) → runner OBLIGATORIO `ubuntu-24.04`
+# (x86_64).
+#
+# Proceso (patrón del job `build-windows-source` de openai/codex en
+# `codex/.github/workflows/rusty-v8-release.yml` y script
+# `codex/.github/scripts/rusty_v8_bazel.py`):
+#   1. Checkout denoland/rusty_v8 @ v<V8_VERSION> con submodules recursive.
+#   2. rustup 1.91.0 + target aarch64-linux-android + sccache (mozilla v0.8.2).
+#   3. V8_FROM_SOURCE=1 cargo build --release --target aarch64-linux-android
+#      --features v8_enable_sandbox  (30-90 min; sccache + actions/cache).
+#   4. Stage en dist/: gzip -6 (mtime=0) del .a + copia del src_binding.rs +
+#      manifest sha256 de EXACTAMENTE 2 líneas.
+#   5. Publica los 3 archivos en la Release `rusty-v8-v<V8_VERSION>` del repo
+#      del port (los consumen scripts/build-codex-ci.sh y codex_build.sh vía
+#      RUSTY_V8_ARCHIVE + RUSTY_V8_SRC_BINDING_PATH).
+#
+# Tiempo estimado: ~60-90 min (primer run sin cache; runs posteriores
+# restauran NDK/clang/gn_out/sccache desde actions/cache).
+#
+# Consumo: con RUSTY_V8_ARCHIVE + RUSTY_V8_SRC_BINDING_PATH exportados, el
+# build.rs del crate v8 NO descarga ni compila V8 (solo linkea el .a); el resto
+# del host (tonic/axum/tokio/prost) ya compila para Android con el parche 08
+# existente y deps ya en Cargo.lock.
+
+name: build-rusty-v8-android
+
+on:
+  workflow_dispatch:
+    inputs:
+      v8_version:
+        description: 'Versión del crate v8 (tag de denoland/rusty_v8) a compilar desde fuente'
+        required: false
+        default: '150.4.0'
+  workflow_call:
+    inputs:
+      v8_version:
+        description: 'Versión del crate v8 de denoland/rusty_v8'
+        required: false
+        type: string
+        default: '150.4.0'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-rusty-v8-${{ github.ref }}-${{ inputs.v8_version || '150.4.0' }}
+  cancel-in-progress: false
+
+jobs:
+  build-android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: write
+    steps:
+      # This reusable workflow also runs helpers owned by the port repository.
+      - name: Check out port repository
+        uses: actions/checkout@v4
+
+      # ── Checkout de denoland/rusty_v8 al tag v<V8_VERSION> ──
+      # submodules: recursive es OBLIGATORIO (V8 source es un submodule).
+      - name: Check out denoland/rusty_v8
+        uses: actions/checkout@v4
+        with:
+          repository: denoland/rusty_v8
+          ref: v${{ inputs.v8_version }}
+          path: upstream-rusty-v8
+          submodules: recursive
+
+      - name: Declare standalone Android NDK GN argument
+        working-directory: upstream-rusty-v8
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("build/config/android/BUILD.gn")
+          text = path.read_text(encoding="utf-8")
+          declaration = 'declare_args() {\n  android_ndk_version = "r26c"\n}\n\n'
+          if "android_ndk_version =" not in text:
+              marker = "assert(is_android)\n"
+              if marker not in text:
+                  raise SystemExit("android BUILD.gn layout changed; cannot declare android_ndk_version")
+              path.write_text(text.replace(marker, declaration + marker, 1), encoding="utf-8")
+          PY
+          grep -n -A3 '^declare_args' build/config/android/BUILD.gn
+
+      - name: Point Chromium Android toolchain at downloaded NDK
+        working-directory: upstream-rusty-v8
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("build/config/android/config.gni")
+          text = path.read_text(encoding="utf-8")
+          old = 'android_ndk_root = "//third_party/android_toolchain/ndk"'
+          new = 'android_ndk_root = "//third_party/android_ndk"'
+          if old in text:
+              text = text.replace(old, new, 1)
+              path.write_text(text, encoding="utf-8")
+          if new not in path.read_text(encoding="utf-8"):
+              raise SystemExit("Chromium Android toolchain still points outside the downloaded NDK")
+          print(f"verified {path}: {new}")
+          PY
+
+      - name: Patch Android bindgen sysroot
+        working-directory: upstream-rusty-v8
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("build.rs")
+          text = path.read_text(encoding="utf-8")
+          marker = '  } else if target_os == "ios" {'
+          android = '''  } else if target_os == "android" {
+              let current_dir = env::current_dir().unwrap();
+              let sysroot = current_dir.join(
+                  "third_party/android_ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot",
+              );
+              clang_args.push("--target=aarch64-linux-android24".to_string());
+              clang_args.push(format!("--sysroot={}", sysroot.display()));
+          } else if target_os == "ios" {'''
+          sysroot = "third_party/android_ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          if sysroot not in text:
+              if marker not in text:
+                  raise SystemExit("rusty_v8 build.rs layout changed; Android bindgen patch cannot be applied")
+              text = text.replace(marker, android, 1)
+              path.write_text(text, encoding="utf-8")
+          elif "--target=aarch64-linux-android24" not in text:
+              raise SystemExit("rusty_v8 build.rs has an incomplete Android bindgen branch")
+          print("verified Android bindgen target and NDK sysroot")
+          PY
+          grep -n -A8 'target_os == "android"' build.rs
+
+      - name: Patch Chromium libc++ for Android Bionic mbstate_t
+        working-directory: upstream-rusty-v8
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("third_party/libc++/src/include/__mbstate_t.h")
+          if not path.is_file():
+              raise SystemExit(f"Chromium libc++ header not found: {path}")
+          text = path.read_text(encoding="utf-8")
+          branch = "#elif __has_include(<bits/mbstate_t.h>)\n# include <bits/mbstate_t.h> // Android Bionic\n"
+          if branch not in text:
+              marker = "#elif __has_include_next(<wchar.h>)"
+              if marker not in text:
+                  raise SystemExit("__mbstate_t.h layout changed; cannot add Bionic mbstate_t branch")
+              text = text.replace(marker, branch + marker, 1)
+              path.write_text(text, encoding="utf-8")
+          if branch not in path.read_text(encoding="utf-8"):
+              raise SystemExit("Android Bionic mbstate_t branch was not applied")
+          print(f"verified {path}: Bionic bits/mbstate_t.h")
+          PY
+
+      - name: Cache Chromium host sysroot
+        id: cache-sysroot
+        uses: actions/cache/restore@v4
+        with:
+          path: upstream-rusty-v8/build/linux/debian_bullseye_amd64-sysroot
+          key: ci-cache-v2-rusty-v8-sysroot-${{ inputs.v8_version || '150.4.0' }}-debian-bullseye-amd64
+
+      - name: Install Chromium host sysroot
+        if: steps.cache-sysroot.outputs.cache-hit != 'true'
+        working-directory: upstream-rusty-v8
+        run: python3 build/linux/sysroot_scripts/install-sysroot.py --arch=amd64
+
+      # ── Submodule status → archivo para la cache key ──
+      # El hash de este archivo identifica el estado exacto de los submodules
+      # (V8 source) para invalidar el cache cuando cambian.
+      - name: Write upstream submodule status
+        working-directory: upstream-rusty-v8
+        run: git submodule status --recursive > git_submodule_status.txt
+
+      - name: Compute Rusty V8 cache contract
+        id: contract
+        env:
+          RUST_TOOLCHAIN: '1.91.0'
+        run: |
+          set -euo pipefail
+          export UPSTREAM_COMMIT="$(git -C upstream-rusty-v8 rev-parse HEAD)"
+          export ANDROID_API=24 ANDROID_NDK_VERSION=r26c ANDROID_TRIPLE_API=aarch64-linux-android24 ZIG_VERSION=none
+          args=(--root "$GITHUB_WORKSPACE" --product rusty-v8
+            --path .github/workflows/build-rusty-v8-android.yml
+            --path upstream-rusty-v8/git_submodule_status.txt
+            --path upstream-rusty-v8/Cargo.lock --path upstream-rusty-v8/build.rs
+            --path upstream-rusty-v8/build/config/android/BUILD.gn
+            --path upstream-rusty-v8/build/config/android/config.gni
+            --path upstream-rusty-v8/third_party/libc++/src/include/__mbstate_t.h
+            --value "V8_VERSION=${{ inputs.v8_version || '150.4.0' }}")
+          cache_key="$(python3 ci/scripts/cache-contract.py key "${args[@]}")"
+          echo "key=$cache_key" >> "$GITHUB_OUTPUT"
+
+      - name: Restore validated Rusty V8 artifact
+        id: cache-v8-artifact
+        uses: actions/cache/restore@v4
+        with:
+          path: dist
+          key: ${{ steps.contract.outputs.key }}-artifact
+
+      - name: Validate Rusty V8 cache
+        id: validate-v8
+        run: |
+          set -euo pipefail
+          if test -s dist/*.sha256 \
+             && test -s dist/*.a.gz \
+             && test -s dist/*.rs \
+             && (cd dist && sha256sum -c ./*.sha256 >/dev/null); then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Durable fallback: the cache quota (10 GiB) can evict this artifact, and
+      # a cold V8 source build costs ~110 minutes. The staged pair is also
+      # published to the `rusty-v8-v<version>` release, which is not subject to
+      # the cache quota. Prefer it over rebuilding.
+      - name: Restore Rusty V8 from release fallback
+        if: steps.validate-v8.outputs.ready != 'true'
+        id: restore-v8-release
+        env:
+          TAG: rusty-v8-v${{ inputs.v8_version || '150.4.0' }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          base="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+          ok=true
+          for name in \
+            librusty_v8_ptrcomp_sandbox_release_aarch64-linux-android.a.gz \
+            src_binding_ptrcomp_sandbox_release_aarch64-linux-android.rs \
+            rusty_v8_ptrcomp_sandbox_release_aarch64-linux-android.sha256; do
+            curl -fsSL "${base}/${name}" -o "dist/${name}" || ok=false
+          done
+          if [ "$ok" = true ] && (cd dist && sha256sum -c ./*.sha256 >/dev/null 2>&1); then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "Restored Rusty V8 from release ${TAG}"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            rm -f dist/librusty_v8_*.a.gz dist/src_binding_*.rs dist/rusty_v8_*.sha256
+            echo "Release fallback unavailable; building from source"
+          fi
+
+      # Reuse Cargo/V8 state from a compatible version, then overlay the
+      # newest per-attempt checkpoint. Cargo, GN and Ninja retain their own
+      # fingerprints, so a small source change rebuilds only affected units.
+      - name: Restore Rusty V8 Cargo dependencies
+        if: steps.validate-v8.outputs.ready != 'true' && steps.restore-v8-release.outputs.ready != 'true'
+        id: cache-v8-dependencies
+        uses: ./ci/actions/incremental-cache
+        with:
+          mode: restore-intermediate
+          key: ci-cache-v2-rusty-v8-cargo-${{ runner.os }}-${{ runner.arch }}-v8-${{ inputs.v8_version || '150.4.0' }}-rust-1.91.0-${{ steps.contract.outputs.key }}
+          restore-prefix: ci-cache-v2-rusty-v8-cargo-${{ runner.os }}-${{ runner.arch }}-v8-${{ inputs.v8_version || '150.4.0' }}-rust-1.91.0-
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+
+      # Submodules are checked out before this cache is restored. Keep the
+      # current checkout's patched third_party tree authoritative; only reuse
+      # generated Cargo/GN output and compiler objects here.
+      - name: Restore Rusty V8 build intermediates
+        if: steps.validate-v8.outputs.ready != 'true' && steps.restore-v8-release.outputs.ready != 'true'
+        id: cache-v8
+        uses: ./ci/actions/incremental-cache
+        with:
+          mode: restore-intermediate
+          key: ci-cache-v2-rusty-v8-intermediates-${{ runner.os }}-${{ runner.arch }}-v8-${{ inputs.v8_version || '150.4.0' }}-api-24-ndk-r26c-rust-1.91.0-${{ steps.contract.outputs.key }}
+          restore-prefix: ci-cache-v2-rusty-v8-intermediates-${{ runner.os }}-${{ runner.arch }}-v8-${{ inputs.v8_version || '150.4.0' }}-api-24-ndk-r26c-rust-1.91.0-
+          path: |
+            upstream-rusty-v8/build/linux/debian_bullseye_amd64-sysroot
+            upstream-rusty-v8/target/aarch64-linux-android/release
+            upstream-rusty-v8/target/sccache
+
+      - name: Restore Rusty V8 resumable checkpoint
+        if: steps.validate-v8.outputs.ready != 'true' && steps.restore-v8-release.outputs.ready != 'true'
+        uses: ./ci/actions/incremental-cache
+        with:
+          mode: restore-checkpoint
+          checkpoint-prefix: ci-cache-v2-recovery-rusty-v8-${{ runner.os }}-${{ runner.arch }}-v8-${{ inputs.v8_version || '150.4.0' }}-api-24-ndk-r26c-rust-1.91.0-contract-${{ steps.contract.outputs.key }}-
+          checkpoint-path: |
+            upstream-rusty-v8/third_party
+            upstream-rusty-v8/build/linux/debian_bullseye_amd64-sysroot
+            upstream-rusty-v8/target
+            ~/.cargo/registry
+            ~/.cargo/git
+            dist
+
+      # These packages/toolchains are needed only on a cold or invalid V8 cache.
+      - name: Install build dependencies
+        if: steps.validate-v8.outputs.ready != 'true' && steps.restore-v8-release.outputs.ready != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 curl git unzip util-linux kmod gpg zstd libglib2.0-dev libclang-19-dev
+          echo "LIBCLANG_PATH=/usr/lib/llvm-19/lib" >> "$GITHUB_ENV"
+
+      - name: Enable zram swap
+        if: steps.validate-v8.outputs.ready != 'true' && steps.restore-v8-release.outputs.ready != 'true'
+        uses: ./ci/actions/zram
+
+      # ── Toolchain Rust del crate v8 150.4.0 (rustup channel del repo) ──
+      - name: Install Rust 1.91.0 + android target
+        if: steps.validate-v8.outputs.ready != 'true' && steps.restore-v8-release.outputs.ready != 'true'
+        run: |
+          rustup toolchain install 1.91.0 --profile minimal
+          rustup target add --toolchain 1.91.0 aarch64-linux-android
+
+      # ── sccache (release binario de mozilla, más rápido que cargo install) ──
+      # SCCACHE_DIR va DENTRO del checkout para incluirlo en el cache key.
+      - name: Install sccache
+        if: steps.validate-v8.outputs.ready != 'true' && steps.restore-v8-release.outputs.ready != 'true'
+        run: |
+          set -euo pipefail
+          SCCACHE_VERSION="v0.8.2"
+          SCCACHE_PLATFORM="x86_64-unknown-linux-musl"
+          curl -fsSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_PLATFORM}.tar.gz" \
+            -o "$RUNNER_TEMP/sccache.tar.gz"
+          tar -xzf "$RUNNER_TEMP/sccache.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/sccache-${SCCACHE_VERSION}-${SCCACHE_PLATFORM}" >> "$GITHUB_PATH"
+          echo "SCCACHE_DIR=${{ github.workspace }}/upstream-rusty-v8/target/sccache" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      # ── Build desde fuente (30-90 min en frío) ──
+      - name: Build rusty_v8 sandbox from source
+        if: steps.validate-v8.outputs.ready != 'true' && steps.restore-v8-release.outputs.ready != 'true'
+        env:
+          V8_FROM_SOURCE: "1"
+          SCCACHE_IDLE_TIMEOUT: "0"
+          # The v150.4.0 V8 checkout references android_ndk_version from
+          # build/config/android/BUILD.gn but does not declare a usable value
+          # for this standalone build. rusty_v8's build.rs appends EXTRA_GN_ARGS.
+          EXTRA_GN_ARGS: >-
+            android_ndk_api_level=24
+            android_ndk_version="r26c"
+            android_ndk_root="${{ github.workspace }}/upstream-rusty-v8/third_party/android_ndk"
+        working-directory: upstream-rusty-v8
+        run: cargo +1.91.0 build --locked --release --target aarch64-linux-android --features v8_enable_sandbox
+
+      # ── Stage del par (archive + binding + manifest) ──
+      # Replica stage_upstream_release_pair()/stage_artifacts() de
+      # codex/.github/scripts/rusty_v8_bazel.py: gzip -6 con mtime=0 (reproducible),
+      # copia del src_binding.rs y manifest sha256 con EXACTAMENTE 2 líneas
+      # "sha256sum  nombre" (una por archivo .gz y .rs).
+      #
+      # Localización tolerante de los archivos: el build.rs del crate v8 escribe
+      # src_binding.rs en target/<TARGET>/release/build/gn_out/src_binding.rs
+      # (build_dir a 2 niveles sobre OUT_DIR) mientras que librusty_v8.a vive en
+      # target/<TARGET>/release/gn_out/obj/. Se busca con find en ambos árboles
+      # (fallback al primer candidato bajo release) con fail-fast informativo.
+      - name: Stage sandbox release pair
+        if: steps.validate-v8.outputs.ready != 'true' && steps.restore-v8-release.outputs.ready != 'true'
+        run: |
+          set -euo pipefail
+          TARGET="aarch64-linux-android"
+          RELEASE="upstream-rusty-v8/target/${TARGET}/release"
+          # librusty_v8.a: vive en $RELEASE/gn_out/obj/ (fallback: cualquier
+          # librusty_v8.a bajo $RELEASE si el árbol de salida cambiara).
+          ARCHIVE="$(find "$RELEASE" -name 'librusty_v8.a' -path '*/gn_out/obj/*' 2>/dev/null | head -1 || true)"
+          [ -n "$ARCHIVE" ] || ARCHIVE="$(find "$RELEASE" -name 'librusty_v8.a' 2>/dev/null | head -1 || true)"
+          if [ -z "$ARCHIVE" ]; then
+              echo "ERROR: librusty_v8.a no encontrado bajo $RELEASE" >&2
+              echo "       Buscado: '*/gn_out/obj/librusty_v8.a' y cualquier 'librusty_v8.a' bajo $RELEASE" >&2
+              exit 1
+          fi
+          # src_binding.rs: lo escribe el build.rs del crate v8 en
+          # $RELEASE/build/gn_out/src_binding.rs (build_dir a 2 niveles sobre
+          # OUT_DIR); el árbol $RELEASE/gn_out solo tiene obj/librusty_v8.a.
+          # Fallback: cualquier src_binding.rs bajo $RELEASE.
+          BINDING="$(find "$RELEASE" -name 'src_binding.rs' -path '*/gn_out/*' 2>/dev/null | head -1 || true)"
+          [ -n "$BINDING" ] || BINDING="$(find "$RELEASE" -name 'src_binding.rs' 2>/dev/null | head -1 || true)"
+          if [ -z "$BINDING" ]; then
+              echo "ERROR: src_binding.rs no encontrado bajo $RELEASE" >&2
+              echo "       Buscado: '*/gn_out/src_binding.rs' y cualquier 'src_binding.rs' bajo $RELEASE" >&2
+              exit 1
+          fi
+          echo "   archive: $ARCHIVE"
+          echo "   binding: $BINDING"
+          mkdir -p dist
+          python3 - "$ARCHIVE" "$BINDING" << 'PYEOF'
+          import gzip, hashlib, shutil, sys
+          from pathlib import Path
+
+          archive_src = Path(sys.argv[1])
+          binding_src = Path(sys.argv[2])
+          target = "aarch64-linux-android"
+          profile = "ptrcomp_sandbox_release"
+          dist = Path("dist")
+          dist.mkdir(exist_ok=True)
+
+          archive = dist / f"librusty_v8_{profile}_{target}.a.gz"
+          binding = dist / f"src_binding_{profile}_{target}.rs"
+          manifest = dist / f"rusty_v8_{profile}_{target}.sha256"
+
+          with archive_src.open("rb") as src, archive.open("wb") as dst:
+              with gzip.GzipFile(filename="", mode="wb", fileobj=dst, compresslevel=6, mtime=0) as gz:
+                  shutil.copyfileobj(src, gz)
+
+          shutil.copyfile(binding_src, binding)
+
+          with manifest.open("w", encoding="utf-8", newline="\n") as out:
+              for path in (archive, binding):
+                  digest = hashlib.sha256()
+                  with path.open("rb") as f:
+                      for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                          digest.update(chunk)
+                  out.write(f"{digest.hexdigest()}  {path.name}\n")
+          print(f"staged: {archive.name} {binding.name} {manifest.name}")
+          PYEOF
+          ls -lh dist/
+
+      - name: Verify staged Rusty V8 manifest
+        run: |
+          set -euo pipefail
+          test -s dist/*.sha256
+          (cd dist && sha256sum -c ./*.sha256)
+
+      - name: Save Rusty V8 sysroot cache
+        if: success() && steps.cache-sysroot.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: ./ci/actions/incremental-cache
+        with:
+          mode: save-final
+          path: upstream-rusty-v8/build/linux/debian_bullseye_amd64-sysroot
+          key: ci-cache-v2-rusty-v8-sysroot-${{ inputs.v8_version || '150.4.0' }}-debian-bullseye-amd64
+
+      - name: Save Rusty V8 Cargo dependency cache
+        if: success() && steps.validate-v8.outputs.ready != 'true' && steps.cache-v8-dependencies.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: ./ci/actions/incremental-cache
+        with:
+          mode: save-intermediate
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ci-cache-v2-rusty-v8-cargo-${{ runner.os }}-${{ runner.arch }}-v8-${{ inputs.v8_version || '150.4.0' }}-rust-1.91.0-${{ steps.contract.outputs.key }}
+
+      - name: Save Rusty V8 source build cache
+        if: success() && steps.cache-v8.outputs.cache-hit != 'true' && steps.validate-v8.outputs.ready != 'true'
+        continue-on-error: true
+        uses: ./ci/actions/incremental-cache
+        with:
+          mode: save-intermediate
+          path: |
+            upstream-rusty-v8/build/linux/debian_bullseye_amd64-sysroot
+            upstream-rusty-v8/target/aarch64-linux-android/release
+            upstream-rusty-v8/target/sccache
+          key: ci-cache-v2-rusty-v8-intermediates-${{ runner.os }}-${{ runner.arch }}-v8-${{ inputs.v8_version || '150.4.0' }}-api-24-ndk-r26c-rust-1.91.0-${{ steps.contract.outputs.key }}
+
+      # ── Artifact (debug / descarga manual si no se quiere Release) ──
+      - name: Upload artifact (debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rusty-v8-${{ inputs.v8_version || '150.4.0' }}-ptrcomp-sandbox-aarch64-linux-android
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Save validated Rusty V8 artifact cache
+        if: success() && steps.validate-v8.outputs.ready != 'true' && steps.cache-v8-artifact.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: ./ci/actions/incremental-cache
+        with:
+          mode: save-final
+          path: dist
+          key: ${{ steps.contract.outputs.key }}-artifact
+
+      - name: Save Rusty V8 resumable checkpoint
+        if: always() && failure()
+        continue-on-error: true
+        uses: ./ci/actions/incremental-cache
+        with:
+          mode: save-checkpoint
+          checkpoint-prefix: ci-cache-v2-recovery-rusty-v8-${{ runner.os }}-${{ runner.arch }}-v8-${{ inputs.v8_version || '150.4.0' }}-api-24-ndk-r26c-rust-1.91.0-contract-${{ steps.contract.outputs.key }}-
+          checkpoint-path: |
+            upstream-rusty-v8/third_party
+            upstream-rusty-v8/build/linux/debian_bullseye_amd64-sysroot
+            upstream-rusty-v8/target
+            ~/.cargo/registry
+            ~/.cargo/git
+            dist
+
+      # Keep the durable fallback fresh whenever a source build succeeds.
+      - name: Publish Rusty V8 release (best effort)
+        if: success() && steps.validate-v8.outputs.ready != 'true' && steps.restore-v8-release.outputs.ready != 'true'
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rusty-v8-v${{ inputs.v8_version || '150.4.0' }}
+          name: rusty-v8 v${{ inputs.v8_version || '150.4.0' }} (Android aarch64, ptrcomp_sandbox)
+          files: dist/*
+          fail_on_unmatched_files: true
+
+      - name: Write CI summary
+        if: always()
+        env:
+          CACHE_DEPENDENCIES: ${{ steps.cache-v8-dependencies.outputs.cache-hit == 'true' && 'hit' || 'miss' }}
+          CACHE_INTERMEDIATES: ${{ steps.cache-v8.outputs.cache-hit == 'true' && 'hit' || 'miss' }}
+        run: source ci/scripts/ci-summary.sh && ci_summary

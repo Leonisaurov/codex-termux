@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "sources": {
+    "codex": {
+      "path": "codex/src",
+      "mode": "vendored",
+      "commit": "be2951ea34f0d295ed0becf97079f92fa5f6950e"
+    }
+  }
+}

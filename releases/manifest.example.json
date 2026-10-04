@@ -1,0 +1,18 @@
+{
+  "schema": "codex-termux/v1",
+  "release": "0.155.1",
+  "stability": "stable",
+  "android": { "arch": "aarch64", "abi": "arm64-v8a", "api": 24 },
+  "components": {
+    "codex": {
+      "version": "be2951ea34f0d295ed0becf97079f92fa5f6950e",
+      "tag": "be2951ea34f0d295ed0becf97079f92fa5f6950e",
+      "asset": "codex-be2951ea34f0d295ed0becf97079f92fa5f6950e-android-aarch64.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 1,
+      "archive": "tar.gz",
+      "depends": [],
+      "files": ["codex-android", "codex-code-mode-host", "codex-linux-sandbox"]
+    }
+  }
+}
