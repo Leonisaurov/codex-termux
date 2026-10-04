@@ -18,7 +18,9 @@ def main():
     p = argparse.ArgumentParser(); p.add_argument("--root", type=pathlib.Path, required=True); p.add_argument("--out", type=pathlib.Path, required=True); p.add_argument("--release", required=True); p.add_argument("--codex", required=True, help="Commit vendeoreado de openai/codex"); a = p.parse_args(); a.out.mkdir(parents=True, exist_ok=True)
     artifact_dirs = [d for d in a.root.iterdir() if d.is_dir() and d.name.startswith(PREFIX)]
     if len(artifact_dirs) != 1: raise SystemExit("codex: artifact ambiguo o ausente")
-    source = artifact_dirs[0]; archive = a.out / f"codex-{a.codex}-android-aarch64.tar.gz"
+    source = artifact_dirs[0]
+    if source.name != PREFIX + a.codex: raise SystemExit(f"codex: el artifact {source.name} no corresponde a --codex {a.codex}")
+    archive = a.out / f"codex-{a.codex}-android-aarch64.tar.gz"
     with tarfile.open(archive, "w:gz") as t:
         for f in FILES:
             matches = list(source.rglob(f))
