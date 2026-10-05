@@ -11,9 +11,17 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: 'Versión del tag codex-v<release>'
-        required: true
-        default: '0.155.1'
+        description: 'Override de la version base del tag (default: [workspace.package] version)'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Decidir y construir sin escribir el release'
+        type: choice
+        required: false
+        default: 'true'
+        options:
+          - 'true'
+          - 'false'
       codex_ref:
         description: 'Commit vendeoreado de openai/codex (debe igualar ci/source-manifest.json)'
         required: true
@@ -27,7 +35,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: codex-release-${{ github.event.inputs.release || github.ref }}
+  # One run per ref: the release tag is chosen from the repository's tag ladder, so
+  # two concurrent runs on main would both pick the same next suffix.
+  group: codex-release-${{ github.ref }}
   # Let an active build publish its recovery checkpoints; newer pending runs
   # still supersede older pending runs in this concurrency group.
   cancel-in-progress: false
@@ -50,6 +60,7 @@ jobs:
           # setup and guard the product before any expensive job.
           for test in \
             test-workflow-cache-contracts \
+            test-release-decision \
             test-vendored-android-patches \
             test-build-state \
             test-ci-summary \
@@ -80,29 +91,103 @@ jobs:
 
   publish:
     needs: [contracts, codex]
-    if: ${{ github.event_name == 'workflow_dispatch' && always() && needs.contracts.result == 'success' && needs.codex.result == 'success' }}
+    if: ${{ always() && needs.contracts.result == 'success' && needs.codex.result == 'success' }}
     permissions:
       contents: write
       actions: read
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_BASE: ${{ inputs.release }}
+      DRY_RUN: ${{ inputs.dry_run == 'true' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Decide whether this source tree is already published
+        id: decision
+        run: |
+          set -euo pipefail
+          mkdir -p release-state
+          field() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"; }
+          gh api --paginate "/repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/codex-v" \
+            --jq '[.[].ref | sub("^refs/tags/";"")]' > release-state/tags.json
+          gh api --paginate "/repos/${GITHUB_REPOSITORY}/releases" \
+            --jq '[.[] | {tag: .tag_name, assets: [.assets[].name]}]' > release-state/releases.json
+          base=()
+          if [ -n "${RELEASE_BASE}" ]; then base=(--base "${RELEASE_BASE}"); fi
+          python3 ci/scripts/release-decision.py --stage newest \
+            --tags-file release-state/tags.json --releases-file release-state/releases.json \
+            "${base[@]}" > release-state/newest.json
+          if [ "$(field release-state/newest.json needs_manifest)" = "true" ]; then
+            mkdir -p release-previous
+            # El manifest del release mas nuevo es la identidad publicada: si bajarlo
+            # falla no se puede decidir, y el job debe morir aqui en vez de tocar un tag.
+            gh release download "$(field release-state/newest.json newest_tag)" \
+              -p manifest.json -D release-previous
+          fi
+          previous=()
+          if [ -f release-previous/manifest.json ]; then
+            previous=(--previous-manifest release-previous/manifest.json)
+          fi
+          dry=()
+          if [ "${DRY_RUN}" = "true" ]; then dry=(--dry-run); fi
+          python3 ci/scripts/release-decision.py --stage decide \
+            --tags-file release-state/tags.json --releases-file release-state/releases.json \
+            "${base[@]}" "${previous[@]}" "${dry[@]}"
+      - name: Report the decision
+        run: |
+          set -euo pipefail
+          {
+            echo "### Publicación de Codex"
+            echo "- fuente: $SOURCE_TREE"
+            echo "- release publicado antes: ${NEWEST_TAG:-ninguno}"
+            echo "- tag: $TAG — $REASON"
+            echo "- publicar: $PUBLISH"
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          SOURCE_TREE: ${{ steps.decision.outputs.source_tree }}
+          NEWEST_TAG: ${{ steps.decision.outputs.newest_tag }}
+          TAG: ${{ steps.decision.outputs.tag }}
+          REASON: ${{ steps.decision.outputs.reason }}
+          PUBLISH: ${{ steps.decision.outputs.publish }}
       - uses: actions/download-artifact@v4
+        if: ${{ steps.decision.outputs.publish == 'true' && github.ref == 'refs/heads/main' }}
         with:
           path: release-input
       - name: Verify the producer and create the manifest
-        env:
-          RELEASE: ${{ inputs.release || '0.155.1' }}
-          CODEX_REF: ${{ inputs.codex_ref || 'be2951ea34f0d295ed0becf97079f92fa5f6950e' }}
+        if: ${{ steps.decision.outputs.publish == 'true' && github.ref == 'refs/heads/main' }}
         run: |
           set -euo pipefail
           test -d release-input
-          python3 ci/scripts/package-release.py --root release-input --out release-output --release "$RELEASE" --codex "$CODEX_REF"
-      - name: Publish immutable release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: codex-v${{ inputs.release || '0.155.1' }}
-          name: codex-termux ${{ inputs.release || '0.155.1' }}
-          files: release-output/*
-          make_latest: true
-          fail_on_unmatched_files: true
+          codex="$(python3 -c 'import json; print(json.load(open("ci/source-manifest.json"))["sources"]["codex"]["commit"])')"
+          python3 ci/scripts/package-release.py --root release-input --out release-output \
+            --release "${{ steps.decision.outputs.release }}" --codex "${codex}" \
+            --source-tree "${{ steps.decision.outputs.source_tree }}"
+      - name: Publish the release
+        if: ${{ steps.decision.outputs.publish == 'true' && github.ref == 'refs/heads/main' }}
+        env:
+          TAG: ${{ steps.decision.outputs.tag }}
+          RELEASE: ${{ steps.decision.outputs.release }}
+          REPUBLISH: ${{ steps.decision.outputs.republish }}
+          SOURCE_TREE: ${{ steps.decision.outputs.source_tree }}
+          CODEX_COMMIT: ${{ steps.decision.outputs.codex_commit }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            'Codex para Android/Termux (aarch64, API 24).' \
+            '' \
+            "Fuente vendeoreada: ${CODEX_COMMIT} de openai/codex" \
+            "Árbol del port (git ls-tree HEAD codex/src): ${SOURCE_TREE}" \
+            'Binarios: codex-android, codex-code-mode-host, codex-linux-sandbox' \
+            '' \
+            'Instalación: sh install.sh (ver el README del repositorio).' \
+            > release-state/notes.md
+          if [ "${REPUBLISH}" = "true" ]; then
+            # Tag existente cuyo release está ausente o le falta el manifest.
+            gh release upload "${TAG}" release-output/* --clobber
+            gh release edit "${TAG}" --latest --title "codex-termux ${RELEASE}" \
+              --notes-file release-state/notes.md
+          else
+            gh release create "${TAG}" release-output/* --target "${GITHUB_SHA}" --latest \
+              --title "codex-termux ${RELEASE}" --notes-file release-state/notes.md
+          fi
+          echo "- release publicado: ${TAG}" >> "$GITHUB_STEP_SUMMARY"

@@ -12,7 +12,8 @@
       "size": 1,
       "archive": "tar.gz",
       "depends": [],
-      "files": ["codex-android", "codex-code-mode-host", "codex-linux-sandbox"]
+      "files": ["codex-android", "codex-code-mode-host", "codex-linux-sandbox"],
+      "source": { "commit": "be2951ea34f0d295ed0becf97079f92fa5f6950e", "tree": "0000000000000000000000000000000000000000" }
     }
   }
 }

@@ -95,7 +95,7 @@ def main() -> None:
     assert "${GITHUB_WORKSPACE}/.ci/zig-${ZIG_VERSION}" in setup
 
     # The orchestrator must wire both producers, consume the producer's artifact
-    # in the same run, and publish only from a successful Codex build.
+    # in the same run, and publish according to the source identity.
     android = (WORKFLOWS / "build.yml").read_text(encoding="utf-8")
     assert "uses: ./.github/workflows/build-rusty-v8-android.yml" in android
     assert "uses: ./.github/workflows/build-codex.yml" in android
@@ -103,6 +103,22 @@ def main() -> None:
     assert "needs: [contracts, rusty-v8]" in android
     assert "needs: [contracts, codex]" in android
     assert "ci/scripts/package-release.py" in android
+    assert "--source-tree" in android
+
+    # Publishing is a property of the vendored tree, not of how the run started: a
+    # manual-only gate would put every release back behind a human dispatch.
+    assert "ci/scripts/release-decision.py" in android
+    assert "github.event_name == 'workflow_dispatch'" not in android
+    assert "steps.decision.outputs.publish == 'true'" in android
+    # Only main owns the tag ladder; a branch run may decide but must not write.
+    assert "github.ref == 'refs/heads/main'" in android
+    assert "group: codex-release-${{ github.ref }}" in android
+
+    # The tag ladder and the cache contract must key off the same expression, or a
+    # release could be called "unchanged" for a tree the cache considers new.
+    identity = "git ls-tree HEAD codex/src"
+    assert identity in (WORKFLOWS / "build-codex.yml").read_text(encoding="utf-8")
+    assert identity in (ROOT / "ci/scripts/release-decision.py").read_text(encoding="utf-8")
 
     # This repository owns Codex only. The stack products live in
     # Leonisaurov/opencode-termux; their workflows must not reappear here.

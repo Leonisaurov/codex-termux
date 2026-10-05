@@ -47,11 +47,14 @@ Never claim a build passed without reading its workflow log and artifact list.
 
 ## CI operations
 
-Use `gh` to dispatch, inspect and monitor runs; a push to `main` validates and
-builds but does not publish. Publishing happens through `workflow_dispatch` on
-`build.yml`, whose `publish` job consumes artifacts from that same run. Cache
-keys are per repository, so the first run after any change to an `ENGINE_PATHS`
-file legitimately misses.
+Use `gh` to dispatch, inspect and monitor runs. Publishing is not a manual step:
+the `publish` job of `build.yml` compares the vendored tree
+(`git ls-tree HEAD codex/src`, the same expression the product cache contract
+hashes) against the identity recorded in the newest `codex-v<base>` release's
+manifest, and publishes the next ladder tag only when they differ. Runs from a
+branch never write releases, and `dry_run=true` on `workflow_dispatch` reports
+the decision without packaging or publishing. Cache keys are per repository, so
+the first run after any change to an `ENGINE_PATHS` file legitimately misses.
 
 ## Conventions
 
