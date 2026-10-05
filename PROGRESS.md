@@ -299,3 +299,51 @@ Postura documentada en `README.md` y `codex/src/docs/android-termux.md`: proot e
 `ptrace` con UID compartido, así que esto **no** es frontera contra código
 deliberadamente malicioso; es frontera real contra escrituras y red accidentales, que
 es lo que `sandbox_mode` puede significar en un dispositivo sin root.
+
+## Dos defectos que destapó la primera corrida de tests en CI (2026-10-05)
+
+El push de `0bd3468` falló en `Test Android sandbox wrapper` y los dos fallos eran
+distintos uno del otro:
+
+1. **Aserción mal escrita, no producto.** `proot_receives_no_double_dash` esperaba
+   `/:/ro`; el código emite `/:/:ro`, que es el spec correcto (`source:target:ro` con
+   `source == target == /`). Se corrigió la aserción.
+2. **Ensanche silencioso de permisos, sí de producto.** Un entrada `deny` del perfil
+   llega al wrapper como `read_only_subpaths` de una raíz escribible
+   (`get_writable_roots_with_cwd_impl` mete ahí cualquier entrada no escribible,
+   incluidas las negadas). El wrapper trataba todos los carveouts igual y los
+   autoenlazaba `ruta:ruta:ro`, y medido: un self-bind `:ro` bloquea escribir, borrar y
+   renombrar **pero deja leer el contenido**. Es decir, una ruta que el perfil niega
+   seguiría siendo legible dentro del sandbox.
+
+La corrección separa los dos casos con la propia predicate de upstream
+(`FileSystemSandboxPolicy::can_read_local_path_with_cwd`), no reimplementando resolución
+de rutas: carveout legible y existente → self-bind `:ro`; negado o inexistente → máscara
+de nodo vacío. Y las negaciones de lectura se enumeran recorriendo `entries`
+(`denied_read_paths`), porque `get_unreadable_roots_with_cwd` **descarta toda negación
+cuando el perfil otorga lectura de disco** — con `Root: read` siempre devolvía `[]`, así
+que ese llamada era código muerto que además no habría enmascarado nada.
+
+Tabla de máscara re-medida en el dispositivo (18 casos de sondeo, plegados después como
+aserciones del harness), que reemplaza lo que la documentación de proot sugería:
+`-b <vacío>:<objetivo>:ro` bloquea leer el contenido, escribir, **crear**, borrar y
+renombrar la hoja; lo que no oculta es la entrada de directorio, así que `ls`/`du` siguen
+imprimiendo el nombre sin poder descender. El sondeo anterior estaba mal formado (los
+binds van antes del comando) y por eso parecía mostrar escapes de creación y borrado.
+
+Además, negar la lectura de `/` ahora **falla cerrado** en vez de omitirse: enmascarar la
+raíz quitaría también el programa a ejecutar y no enmascarar nada dejaría legible justo
+lo negado. Los perfiles estándar de Codex nunca hacen esto (`workspace_write` otorga
+`Root: read` y sus deny son sub-rutas), así que no se rompe ningún modo real.
+
+Evidencia local: `bash codex/test/sandbox-proot/run.sh <shim>` → **PASS, 37 aserciones**
+(incluido el bloque nuevo `path-deny`, que comprueba lectura negada, escritura, `rm -rf`,
+que el token real sigue intacto fuera y que el `--dry-run` emite máscara con fuente vacía
+y no `$PRIV:$PRIV:ro`). El fix va en `31f893f` y su corrida es
+`37263534411` (pendiente de leer en log: `cargo test -p codex-android-sandbox` verde y
+luego el build android completo, que con el árbol nuevo vuelve a ser frío).
+
+Sigue sin validar con el ELF real, y ese es el gate: correr el harness contra
+`$PREFIX/bin/codex-linux-sandbox` y `SANDBOX_MODE=workspace-write
+codex/test/lock-regression/run.sh`. Hasta entonces lo probado es la semántica de proot y
+la plomería del harness, no el binario instalado.
