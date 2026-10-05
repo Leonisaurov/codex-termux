@@ -14,6 +14,9 @@ CODEX = os.path.abspath(sys.argv[1])
 HOME_DIR = os.path.abspath(sys.argv[2])
 PORT = sys.argv[3]
 AMENDMENT = json.loads(sys.argv[4]) if len(sys.argv) > 4 else ["echo"]
+# Lo define run.sh; el default es el modo que no necesita sandbox, así que correr el
+# probe suelto sigue funcionando como smoke de arranque.
+SANDBOX_MODE = os.environ.get("SANDBOX_MODE", "danger-full-access")
 
 env = dict(os.environ)
 env["CODEX_HOME"] = HOME_DIR
