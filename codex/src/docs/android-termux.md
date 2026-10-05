@@ -38,22 +38,69 @@ gate in `tui/Cargo.toml`, the Termux CA bundle path in
 `tui/src/clipboard_paste.rs`, `code-mode-protocol/build.rs` aside) are taken
 as-is.
 
-## Sandbox limitation
+## Sandbox
 
-Android does not provide the Linux sandbox primitives expected by the upstream
-CLI, and on this pin the restrictive sandboxes do not run at all: the sandbox
-executable is only discovered by `arg0` under `cfg!(target_os = "linux")`
-(`arg0/src/lib.rs:261`), so on Android `Config::codex_linux_sandbox_exe` stays
-`None`, the key is not settable from TOML, and `sandbox_mode=read-only` or
-`workspace-write` fails every command with
-`LandlockSandboxExecutableNotProvided` (`sandboxing/src/lib.rs` maps
-`SandboxTransformError::MissingLinuxSandboxExecutable` to it). `codex` therefore
-only executes commands unsandboxed (`danger-full-access`) on Termux. The packaged
-`codex-linux-sandbox` is a diagnostic stub that prints a message and exits 78 — it
-does not invoke `proot`, even though Termux ships `proot` and a real wrapper built
-on it is the obvious way to close this gap. The native
-`codex-rs/linux-sandbox` executable must not be described as a working Android
-sandbox.
+Upstream builds its Linux sandbox from three primitives, and this device has none
+of them: Landlock needs a >= 5.13 kernel (this is 5.10-android12 and the syscall
+dies under seccomp), `unshare(CLONE_NEWUSER|CLONE_NEWNS)` returns `EINVAL` so
+bubblewrap cannot mount any filesystem view, and `bwrap` is not installed. Termux
+does ship `proot`, which resolves paths with `ptrace` inside the user's own
+process, and that is the only mechanism available here. `codex-rs/android-sandbox`
+is therefore a port-owned `codex-linux-sandbox`: it reads the
+`--permission-profile` JSON the upstream manager produces and turns it into a
+`proot` invocation.
+
+Selection is patched too: `arg0` only injects the sandbox executable under
+`cfg!(target_os = "linux")` (`arg0/src/lib.rs:261`), which is why
+`sandbox_mode=read-only` and `workspace-write` used to fail every command with
+`LandlockSandboxExecutableNotProvided`. An `android` branch now resolves the
+wrapper next to the running executable (falling back to `PATH`), so a missing
+wrapper still produces the upstream error instead of running unsandboxed.
+
+What the wrapper emits, all measured on the device:
+
+- `-b /:/:ro` makes the whole filesystem unwritable (`openat` with write intent
+  fails `EROFS`); a later `-b <root>:<root>` reopens writes under one root, and
+  `-b <sub>:<sub>:ro` closes them again inside it. Bindings are ordered by depth
+  because the last match wins.
+- `/dev` is bound read-only and the device nodes a shell needs (`/dev/null`,
+  `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, `/dev/tty`) are reopened
+  writable; `/dev` is not listable in the Termux runtime and the rest stays closed.
+- `-b <vacío>:<objetivo>:ro` masks content and blocks writes, and it works for
+  targets that do not exist yet, so `.git`, `.agents` and `.codex` carveouts hold
+  even against first-time creation.
+- `--net-policy deny` fails `connect`/`bind` with `EACCES` (loopback included).
+- `proot` rejects `--` as a separator, so the wrapped command follows the options
+  directly; exit codes and argv arrive unmodified.
+
+The honest limits:
+
+- proot is `ptrace` and the tracee shares the UID with the tracer, so this is not
+  a boundary against deliberately malicious code. It is a real boundary against
+  accidental writes and network use, which is what `sandbox_mode` can mean on an
+  unrooted device.
+- Profiles that restrict *reads* to an allowlist are refused (building that view
+  needs `-r` plus a rebuilt `/proc`, `$PREFIX` and the Termux symlinks), as are
+  `deny` rules expressed as glob patterns and managed network
+  (`--allow-network-for-proxy`), which the wrapper cannot express without the proxy
+  path. Every one of these fails closed with exit 78 and never runs the command.
+- The native `codex-rs/linux-sandbox` (bubblewrap/Landlock/seccomp) is still not a
+  working Android sandbox and must not be described as one; it is not built here.
+
+Two harnesses cover this:
+
+```sh
+bash codex/test/sandbox-proot/run.sh /path/to/codex-linux-sandbox   # argv + enforcement
+SANDBOX_MODE=workspace-write \
+    bash codex/test/lock-regression/run.sh /path/to/codex-android   # turno real
+```
+
+The first asserts both the argv the wrapper would emit (`--dry-run`) and what the
+sandbox really blocks on the device. The second runs a real app-server turn and,
+in a restrictive mode, additionally asserts that the turn reached the wrapper
+through `CODEX_ANDROID_SANDBOX_LOG` — the argv translation itself is covered by
+`cargo test -p codex-android-sandbox`, which CI runs before the long build
+("Test Android sandbox wrapper").
 
 ## File locks
 
@@ -86,9 +133,11 @@ bash codex/test/lock-regression/run.sh /path/to/codex-android
 The harness boots the real app-server against a scripted Responses API stand-in
 and fails if the binary reports `lock() not supported` or if the turn's command
 does not run. The `rules/default.rules` write is asserted only when the
-app-server actually asks for an approval; under the sandbox situation described
-above it never asks on Android, so that assertion reports `skip` instead of
-passing silently.
+app-server actually asks for an approval; in the default `danger-full-access`
+mode nothing denies a command, so that assertion reports `skip` instead of passing
+silently. Under `SANDBOX_MODE=workspace-write` the proot wrapper does deny writes
+outside the workspace, which is the path where an approval — and the rules write —
+become reachable.
 
 ## TLS segment alignment
 

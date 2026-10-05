@@ -260,6 +260,10 @@ where
         codex_self_exe: current_exe.clone(),
         codex_linux_sandbox_exe: if cfg!(target_os = "linux") {
             linux_sandbox_exe_path(path_entry_guard.as_ref(), current_exe)
+        // CODEX-TERMUX-ANDROID-PATCH: en Android el sandbox es el wrapper de proot que
+        // se instala junto a este ejecutable, así que se resuelve por ruta hermana.
+        } else if cfg!(target_os = "android") {
+            android_sandbox_exe_path(current_exe)
         } else {
             None
         },
@@ -285,6 +289,26 @@ fn linux_sandbox_exe_path(
     path_entry_guard
         .and_then(|path_entry| path_entry.paths().codex_linux_sandbox_exe.clone())
         .or(current_exe)
+}
+
+/// CODEX-TERMUX-ANDROID-PATCH: ruta del wrapper de sandbox en Android/Termux.
+///
+/// El alias de `arg0` no sirve aquí: ese mecanismo existe para que un único
+/// binario se despache por nombre, y en Android el sandbox es un binario
+/// aparte (`codex-android-sandbox`) que el instalador deja junto a `codex-android`.
+/// Se busca primero como hermana del ejecutable y luego en `PATH`, y si no
+/// aparece se devuelve `None` para que el error siga siendo el de siempre
+/// (`LandlockSandboxExecutableNotProvided`) en lugar de ejecutar sin sandbox.
+fn android_sandbox_exe_path(current_exe: Option<PathBuf>) -> Option<PathBuf> {
+    let exe_dir = current_exe.as_ref()?.parent()?;
+    let sibling = exe_dir.join(CODEX_LINUX_SANDBOX_ARG0);
+    if sibling.is_file() {
+        return Some(sibling);
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(CODEX_LINUX_SANDBOX_ARG0))
+        .find(|candidate| candidate.is_file())
 }
 
 fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {

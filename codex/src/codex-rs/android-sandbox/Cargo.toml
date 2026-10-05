@@ -1,0 +1,26 @@
+[package]
+name = "codex-android-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# CODEX-TERMUX-ANDROID-PATCH: el binario se llama codex-linux-sandbox porque ese
+# es el nombre que el manager de sandbox espera en el argv y en el arbol instalado.
+[[bin]]
+name = "codex-linux-sandbox"
+path = "src/main.rs"
+
+[lib]
+name = "codex_android_sandbox"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+codex-protocol = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

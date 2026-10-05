@@ -53,7 +53,9 @@ jobs:
     needs: rusty-v8
     if: always() && (inputs.use_existing_v8 || needs.rusty-v8.result == 'success')
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # 180 min cubrían el build android frío; los tests de host del wrapper suman su
+    # propio compile de la clausura de codex-protocol antes de ese build.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
 
@@ -228,6 +230,21 @@ jobs:
           echo "$RUNNER_TEMP/sccache-${SCCACHE_VERSION}-${SCCACHE_PLATFORM}" >> "$GITHUB_PATH"
           echo "SCCACHE_DIR=${{ env.WORK_DIR }}/sccache" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      # CODEX-TERMUX-ANDROID-PATCH: el wrapper de sandbox es código del puerto, y sus
+      # tests solo corren aquí (el dispositivo no compila). Se ejecuta antes del build
+      # largo y bajo la misma condición que el build: cualquier cambio en android-sandbox
+      # mueve CODEX_SOURCE_TREE, así que un cache-hit implica que ya se validó.
+      # RUSTC_WRAPPER vacío: son unidades de host (x86_64), nunca sirven al build
+      # android y ensaniciarían la caché de objetos que se guarda más abajo.
+      - name: Test Android sandbox wrapper
+        if: steps.validate-codex.outputs.ready != 'true'
+        working-directory: codex/src/codex-rs
+        run: |
+          set -euo pipefail
+          RUST_TOOLCHAIN="$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml | head -1)"
+          test -n "$RUST_TOOLCHAIN"
+          RUSTC_WRAPPER="" cargo +"$RUST_TOOLCHAIN" test --locked -p codex-android-sandbox
 
       - name: Build Codex CLI and code-mode host
         if: steps.validate-codex.outputs.ready != 'true'

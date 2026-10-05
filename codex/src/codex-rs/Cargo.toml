@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "android-sandbox",
     "aws-auth",
     "analytics",
     "agent-graph-store",

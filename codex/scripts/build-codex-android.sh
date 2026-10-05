@@ -126,12 +126,14 @@ grep -qF '[target.aarch64-linux-android.dependencies]' "$CORE_MANIFEST" || {
     exit 1
 }
 
+# El sandbox de Android es un binario propio (wrapper sobre proot), no un script:
+# se compila junto con el CLI para que el instalador valide un ELF real.
 cargo build --locked --release --target "$ANDROID_TRIPLE" \
-    --package codex-cli --package codex-code-mode-host
+    --package codex-cli --package codex-code-mode-host --package codex-android-sandbox
 
 install -m 0755 "$CODEX_TARGET_DIR/$ANDROID_TRIPLE/release/codex" "$CODEX_OUT"
 install -m 0755 "$CODEX_TARGET_DIR/$ANDROID_TRIPLE/release/codex-code-mode-host" "$CODEX_HOST_OUT"
-install -m 0755 "$SCRIPT_DIR/codex-linux-sandbox" "$CODEX_SANDBOX_OUT"
+install -m 0755 "$CODEX_TARGET_DIR/$ANDROID_TRIPLE/release/codex-linux-sandbox" "$CODEX_SANDBOX_OUT"
 
 # Bionic's arm64 loader refuses an executable whose PT_TLS is aligned below 64 bytes,
 # and it aborts before main() with "executable's TLS segment is underaligned". V8 only
@@ -155,4 +157,5 @@ verify_tls_alignment() {
 }
 verify_tls_alignment "$CODEX_OUT"
 verify_tls_alignment "$CODEX_HOST_OUT"
+verify_tls_alignment "$CODEX_SANDBOX_OUT"
 echo "Codex outputs: $CODEX_OUT and $CODEX_HOST_OUT"
