@@ -33,22 +33,34 @@ releases             ejemplo de manifest
 Todo build pesado corre en GitHub Actions; este repositorio no es un runner local.
 
 ```sh
-gh workflow run build.yml -R Leonisaurov/codex-termux --ref main \
-  -f release=0.155.1 \
-  -f codex_ref=be2951ea34f0d295ed0becf97079f92fa5f6950e \
-  -f v8_version=150.4.0
 gh run watch <RUN_ID> -R Leonisaurov/codex-termux --exit-status
 ```
 
 `build.yml` encadena `contracts` (chequeos estáticos) → `rusty-v8` → `codex` →
-`publish`, que publica la release `codex-v<release>` con `manifest.json` y el
-`.tar.gz` de los tres binarios. Un push a `main` valida y construye pero no
-publica.
+`publish`. Publicar no es un paso manual: el job compara el árbol vendeoreado
+(`git ls-tree HEAD codex/src`, la misma expresión que invalida la cache del build)
+con el árbol que figura en el manifest del último release `codex-v<base>…`, y solo
+si son distintos emite una release nueva con el siguiente sufijo del ladder
+(`codex-v0.155.1-3`, `-4`, …). Un push a `main` que no tocó `codex/src` —por ejemplo
+un cambio en `ci/`— compila por cache y no publica nada.
+
+```sh
+# Reempaqueta y publica la fuente actual sin esperas de build:
+gh workflow run build.yml -R Leonisaurov/codex-termux --ref main \
+  -f codex_ref=be2951ea34f0d295ed0becf97079f92fa5f6950e -f v8_version=150.4.0
+# Solo qué decidiría el pipeline, sin escribir releases:
+gh workflow run build.yml -R Leonisaurov/codex-termux --ref main -f dry_run=true
+```
+
+`release` es un override opcional de la versión base del tag; por defecto se lee de
+`[workspace.package] version` en `codex/src/codex-rs/Cargo.toml`. La identidad publicada
+viaja en `components.codex.source` del manifest, y un release ya publicado nunca se
+sobrescribe: lo que se reescribe es un tag cuyo release quedó ausente o sin manifest.
 
 Chequeos estáticos, sin runner:
 
 ```sh
-for t in test-workflow-cache-contracts test-vendored-android-patches test-build-state test-ci-summary test-installer; do
+for t in test-workflow-cache-contracts test-release-decision test-vendored-android-patches test-build-state test-ci-summary test-installer; do
   python3 "ci/scripts/$t.py"
 done
 ```

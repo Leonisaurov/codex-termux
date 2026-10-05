@@ -42,6 +42,17 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue((self.prefix / "bin" / name).is_file(), name)
     def test_just_codex_is_accepted(self):
         r = self.run_installer("--just", "codex"); self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_source_identity_block_does_not_break_install(self):
+        # package-release.py registra el arbol vendeoreado en el manifest para que el
+        # pipeline sepa si ya publico esta fuente; el instalador debe ignorarlo.
+        data = json.loads(self.manifest.read_text())
+        data["components"]["codex"]["source"] = {"commit": "c" * 40, "tree": "d" * 40}
+        self.manifest.write_text(json.dumps(data))
+        r = self.run_installer()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((self.prefix / "bin" / "codex-android").is_file())
+
     def test_unknown_component_is_rejected(self):
         r = self.run_installer("--just", "opencode"); self.assertNotEqual(r.returncode, 0)
         self.assertFalse((self.prefix / "bin").exists())

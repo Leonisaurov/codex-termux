@@ -397,3 +397,58 @@ del servidor fake pida `sandbox_permissions: "require_escalated"` (o una políti
 Borrado el gate: el wrapper está validado con el binario instalado, no con un shim. Lo
 que falta es publicarlo (`0.155.1-3`) y confirmar `install.sh` + los mismos harnesses
 contra `$PREFIX/bin/codex-linux-sandbox`.
+
+## El release pasa a ser parte del pipeline: publicar por identidad de árbol (2026-10-05)
+
+El gate de `publish` era `github.event_name == 'workflow_dispatch'`, o sea: cada release
+dependía de que alguien lo disparara a mano. Ahora la publicación es una propiedad de la
+fuente. La identidad elegida es `git ls-tree HEAD codex/src` —la misma expresión que
+`build-codex.yml:102` mete en el contrato de cache—, así que "¿cambió la fuente?" y
+"¿hay que recompilar?" son literalmente la misma pregunta, y un push que solo tocó `ci/`
+compila por cache y no publica nada.
+
+`package-release.py` registra esa identidad en el manifest
+(`components.codex.source.{commit,tree}`, schema `codex-termux/v1` sin cambiar porque el
+instalador tolera claves nuevas). `ci/scripts/release-decision.py` decide con datos
+pasados como ficheros JSON (`matching-refs/tags/codex-v` + la lista de releases con sus
+assets + el manifest del release más nuevo), sin red dentro del script: eso deja cada rama
+del ladder en `test-release-decision.py`, que corre en `contracts`.
+
+Ladder: sin releases de la base → tag pelado; árbol distinto → siguiente sufijo; árbol
+igual → no publicar. Los tres releases heredados (`codex-v0.155.1`, `-1`, `-2`) no tienen
+`source`, así que se tratan como identidad desconocida: **no se sobrescriben**, el ladder
+pasa a `-3`. Un tag cuyo release está ausente o le falta el manifest es la única cosa que
+se reescribe, y con `gh release upload --clobber` sobre el mismo tag.
+
+Se cambió `softprops/action-gh-release` por `gh release create/upload/edit`: la acción de
+terceros silencia un asset homónimo ya existente, y aquí interesa exactamente lo contrario
+(saber qué toca el pipeline). `concurrency.group` pasó a ser fijo por ref, porque con el
+grupo viejo un dispatch con `release` explícito corría en paralelo con un push a `main` y
+los dos elegían `-3`.
+
+## Evidencia de la simulación local (antes de tocar CI)
+
+No se puede correr Actions en el teléfono, pero sí los `run:` tal cual: un simulador
+($PREFIX/tmp/simulate-publish-job.py) extrae los pasos del job `publish` del YAML, aplica
+la única sustitución que hace Actions (`steps.decision.outputs.*`), y los ejecuta contra un
+`gh` de juguete y los JSON reales del repo. Corridas:
+
+| Escenario | Resultado leído |
+|---|---|
+| `main`, estado real de hoy | `tag=codex-v0.155.1-3`, `reason=previous-release-without-identity`, `gh release create` con `--target $GITHUB_SHA --latest`; manifest emitido con `source.tree=11f235d15ee85dc7f177371ba5cd26f9fdfcc640` |
+| rama `ci/auto-publish` | decide `-3` y **no** ejecuta package/publish (`github.ref` no es main) |
+| `dry_run=true` en main | `publish=false`, `reason=dry-run`, tag reportado igual |
+| release `-3` ya publicado con el mismo árbol | `publish=false`, `reason=source-unchanged` |
+| tag `-3` existe, release no | `republish=true`, `gh release upload --clobber` + `edit --latest` sobre el mismo tag |
+
+La simulación también encontró dos defectos propios del script (un `digest = fields[1]`
+que tomaba la palabra `tree` en vez del SHA, y un newline comido por una edición), ambos
+corregidos antes de subir nada.
+
+## Pendiente de esta tarea
+
+- CI en rama con `dry_run=true` (evidencia de `contracts` y del paso `decision` en runner).
+- Merge a `main` ⇒ debe publicar `0.155.1-3` solo; luego un dispatch inmediato esperado
+  `source-unchanged`.
+- `install.sh` + los tres harnesses contra `$PREFIX/bin/*` con ese release.
+- La cobertura que sigue sin hacerse: `rules/default.rules` con `require_escalated`.
