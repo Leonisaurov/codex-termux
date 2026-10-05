@@ -31,9 +31,14 @@ TMPDIR="${TMPDIR:-/data/data/com.termux/files/usr/tmp}"
 WORK="$(mktemp -d "$TMPDIR/codex-sandbox-proot.XXXXXX")"
 export TMPDIR="$WORK/tmp"
 WS="$WORK/ws"
-mkdir -p "$WS/.git" "$TMPDIR"
+mkdir -p "$WS/.git" "$WS/private" "$TMPDIR"
 printf '[core]\n\tbare = false\n' > "$WS/.git/config"
 printf 'semilla\n' > "$WS/archivo.txt"
+# Ruta negada dentro de la raíz escribible: es el caso que un self-bind convertiría en
+# decorado, porque enlazar un directorio contra sí mismo en `:ro` deja leerlo.
+PRIV="$WS/private"
+printf 'TOKEN=secreto\n' > "$PRIV/tokens.txt"
+DENIED_PATH="$PRIV"
 SHELL_BIN="${SHELL_BIN:-/system/bin/sh}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
@@ -76,11 +81,11 @@ except OSError:
 done
 
 profile() {
-    # profile <kind> [<ruta>] -> JSON PermissionProfile en stdout
-    "$PYTHON_BIN" - "$1" "$WS" <<'PY'
+    # profile <kind> -> JSON PermissionProfile en stdout
+    "$PYTHON_BIN" - "$1" "$WS" "$DENIED_PATH" <<'PY'
 import json, sys
 
-kind, ws = sys.argv[1], sys.argv[2]
+kind, ws, denied = sys.argv[1], sys.argv[2], sys.argv[3]
 
 
 def entry(value, access):
@@ -122,6 +127,15 @@ elif kind == "danger-full-access":
     profile_value = {"type": "disabled"}
 elif kind == "read-allowlist":
     profile_value = managed([path_entry(ws, "write")], "enabled")
+elif kind == "path-deny":
+    profile_value = managed(
+        [
+            entry({"kind": "root"}, "read"),
+            entry({"kind": "project_roots"}, "write"),
+            path_entry(denied, "deny"),
+        ],
+        "enabled",
+    )
 elif kind == "glob-deny":
     profile_value = managed(
         [
@@ -262,6 +276,41 @@ if exits_nonzero run_sandbox workspace-write -- "$SHELL_BIN" -c "echo veneno > /
     ok "/dev sigue cerrado salvo los nodos reabiertos"
 else
     fail "se pudo escribir en /dev/kmsg"
+fi
+
+# --------------------------------------- 2.b negación de lectura dentro de la raíz escribible
+# Un bind `dir:dir:ro` bloquea escrituras pero deja leer: si la máscara de una entrada
+# `deny` se confunde con un carveout read-only, la ruta secreta sigue siendo legible.
+if exits_zero run_sandbox workspace-write -- "$SHELL_BIN" -c "cat '$PRIV/tokens.txt' > /dev/null"; then
+    ok "control: sin la entrada deny la misma lectura pasa"
+else
+    fail "el control falló: $PRIV no es legible sin deny; las pruebas de abajo no probarían nada"
+fi
+if run_sandbox path-deny -- "$SHELL_BIN" -c "cat '$PRIV/tokens.txt'" 2>&1 \
+    | grep -q 'TOKEN'; then
+    fail "SE PUDO LEER la ruta negada: la máscara no ocultó el contenido"
+else
+    ok "la ruta negada no entrega su contenido"
+fi
+if exits_nonzero run_sandbox path-deny -- "$SHELL_BIN" -c "echo x >> '$PRIV/tokens.txt'"; then
+    ok "la ruta negada no se puede escribir"
+else
+    fail "se pudo escribir en la ruta negada"
+fi
+if exits_nonzero run_sandbox path-deny -- "$SHELL_BIN" -c "rm -rf '$PRIV'"; then
+    ok "la ruta negada no se puede borrar"
+else
+    fail "se pudo borrar la ruta negada"
+fi
+[ -s "$PRIV/tokens.txt" ] || fail "el token real desapareció: la máscara borró en vez de ocultar"
+dry_deny="$(run_sandbox path-deny --dry-run -- "$SHELL_BIN" -c 'exit 0')"
+printf '%s\n' "$dry_deny" > "$WORK/dry-run-path-deny.txt"
+if grep -qxF -- "$PRIV:$PRIV:ro" "$WORK/dry-run-path-deny.txt"; then
+    fail "la negación de lectura se autoenlaza ($PRIV:$PRIV:ro): dejaría leer el contenido"
+elif grep -q ":$PRIV:ro" "$WORK/dry-run-path-deny.txt"; then
+    ok "la negación de lectura se emite como máscara con fuente vacía"
+else
+    fail "path-deny no emitió ninguna máscara para $PRIV"
 fi
 
 # La red: primero el control positivo sin sandbox, luego dentro. El programa python va

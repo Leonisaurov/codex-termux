@@ -14,8 +14,12 @@
 //! - `-b /:/:ro` vuelve el filesystem completo no escribible: los `openat` con
 //!   intención de escritura fallan con `EROFS` dentro del sandbox.
 //! - un segundo `-b <raíz>:<raíz>` reabre la escritura en un subárbol, y
-//!   `-b <sub>:<sub>:ro` la vuelve a cerrar dentro de esa raíz.
-//! - `-b <vacío>:<objetivo>:ro` oculta el contenido real y además impide escribir.
+//!   `-b <sub>:<sub>:ro` la vuelve a cerrar dentro de esa raíz. Sobre una ruta que
+//!   sí se puede leer, ese self-bind es el carveout correcto: bloquea escribir,
+//!   borrar y renombrar sin ocultar el contenido.
+//! - `-b <vacío>:<objetivo>:ro` oculta el contenido real e impide escribir, crear,
+//!   borrar y renombrar la hoja; solo el nombre sigue visible en `ls`. Es la máscara
+//!   que llevan las negaciones de lectura y los carveouts que aún no existen.
 //! - `--net-policy deny` falla `connect`/`bind` con `EACCES`.
 //!
 //! Esto no es una frontera contra código deliberadamente malicioso: proot es ptrace
@@ -293,39 +297,35 @@ pub fn build_plan(profile: &PermissionProfile, cwd: &Path, mask_root: &Path) -> 
                     read_only: false,
                 });
                 for subpath in &root.read_only_subpaths {
-                    // Se enmascara aunque todavía no exista: proot virtualiza el bind y
-                    // así la creación del carveout también falla con EROFS, igual que
-                    // exige upstream para `.git`/`.codex` recién creados. Un bind con
-                    // fuente inexistente aborta a proot, así que lo que falta se enlaza
-                    // con un nodo vacío del soporte de máscaras.
-                    let path = subpath.as_path();
-                    bindings.push(Binding {
-                        source: if path.exists() {
-                            path.to_path_buf()
-                        } else {
-                            source_for(path, &empty_dir, &empty_file)
-                        },
-                        target: path.to_path_buf(),
-                        read_only: true,
-                    });
+                    bindings.push(carveout_binding(
+                        subpath.as_path(),
+                        cwd,
+                        &file_system,
+                        &empty_dir,
+                        &empty_file,
+                    ));
                 }
             }
             // Un nombre protegido puede no existir todavía; sin máscara el comando
             // podría crearlo bajo una raíz escribible, así que se enlaza vacío.
             for name in &root.protected_metadata_names {
-                let path = root_path.join(name);
-                bindings.push(Binding {
-                    source: source_for(&path, &empty_dir, &empty_file),
-                    target: path,
-                    read_only: true,
-                });
+                bindings.push(carveout_binding(
+                    &root_path.join(name),
+                    cwd,
+                    &file_system,
+                    &empty_dir,
+                    &empty_file,
+                ));
             }
         }
-        for unreadable in file_system.get_unreadable_roots_with_cwd(cwd) {
-            let path = unreadable.as_path();
+        // Las negaciones de lectura se resuelven aquí y no con
+        // `get_unreadable_roots_with_cwd`: con lectura de disco completa esa función
+        // descarta toda entrada negada porque el propio camino la considera legible, y
+        // el perfil seguiría negándola por entrada.
+        for path in denied_read_paths(&file_system, cwd)? {
             bindings.push(Binding {
-                source: source_for(path, &empty_dir, &empty_file),
-                target: path.to_path_buf(),
+                source: source_for(&path, &empty_dir, &empty_file),
+                target: path,
                 read_only: true,
             });
         }
@@ -335,6 +335,83 @@ pub fn build_plan(profile: &PermissionProfile, cwd: &Path, mask_root: &Path) -> 
         deny_network: !network_enabled,
         bindings: order_bindings(bindings),
     })
+}
+
+/// Bind de un carveout dentro de una raíz escribible.
+///
+/// Dos casos que upstream separa y que un self-bind confundiría:
+/// - lectura permitida y ruta existente (`<ws>/.git`): se enlaza la ruta contra sí misma
+///   en read-only, porque un bind de origen vacío ocultaría el contenido que sí se puede
+///   leer. Medido: `:ro` sobre sí misma bloquea escribir, borrar y renombrar.
+/// - lectura negada, o ruta que falta (`<ws>/.codex` aún no creado): se enlaza un nodo
+///   vacío. Un bind con fuente inexistente aborta a proot; la máscara vacía sí bloquea
+///   lectura, escritura, creación, borrado y renombrado de la hoja.
+fn carveout_binding(
+    path: &Path,
+    cwd: &Path,
+    file_system: &FileSystemSandboxPolicy,
+    empty_dir: &Path,
+    empty_file: &Path,
+) -> Binding {
+    let readable = path.exists() && file_system.can_read_local_path_with_cwd(path, cwd);
+    Binding {
+        source: if readable {
+            path.to_path_buf()
+        } else {
+            source_for(path, empty_dir, empty_file)
+        },
+        target: path.to_path_buf(),
+        read_only: true,
+    }
+}
+
+/// Rutas concretas que el perfil niega leer, resueltas contra `cwd`.
+///
+/// `get_unreadable_roots_with_cwd` no basta: descarta toda negación cuando el perfil
+/// también otorga lectura de disco completa, así que esas rutas quedarían legibles.
+fn denied_read_paths(
+    file_system: &FileSystemSandboxPolicy,
+    cwd: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    for entry in &file_system.entries {
+        if entry.access != FileSystemAccessMode::Deny {
+            continue;
+        }
+        match &entry.path {
+            FileSystemPath::Path { path } => paths.push(path.to_path_buf()),
+            FileSystemPath::GlobPattern { .. } => {}
+            FileSystemPath::Special { value } => paths.push(match value {
+                // Enmascarar `/` borraría el filesystem entero, incluido el programa a
+                // ejecutar, y no enmascarar nada dejaría legible justo lo que el perfil
+                // niega. Un perfil que otorga lectura de disco y la niega a la vez es
+                // contradictorio y no tiene interpretación segura, así que se falla.
+                FileSystemSpecialPath::Root => {
+                    return Err(
+                        "el perfil niega la lectura de todo el disco y el wrapper de proot no \
+                         puede enmascarar la raíz sin borrar también el programa a ejecutar"
+                            .to_string(),
+                    );
+                }
+                FileSystemSpecialPath::SlashTmp => PathBuf::from("/tmp"),
+                FileSystemSpecialPath::Tmpdir => std::env::temp_dir(),
+                FileSystemSpecialPath::ProjectRoots { subpath } => match subpath {
+                    Some(subpath) => cwd.join(subpath),
+                    None => cwd.to_path_buf(),
+                },
+                // `Minimal` es un conjunto de rutas del runtime, no una ruta: negar lo
+                // que no se puede resolver enmascararía otra cosa, así que se falla.
+                FileSystemSpecialPath::Minimal | FileSystemSpecialPath::Unknown { .. } => {
+                    return Err(format!(
+                        "el perfil niega la lectura de una ruta especial no resoluble ({:?}) y \
+                         el wrapper de proot no sabe qué enmascarar",
+                        value
+                    ));
+                }
+            }),
+        }
+    }
+    Ok(paths)
 }
 
 /// Los binds de proot se resuelven en orden: el último que coincide gana. Se ordenan de
@@ -701,7 +778,7 @@ mod tests {
         assert_eq!(argv[0], OsString::from("--net-policy"));
         assert_eq!(argv[1], OsString::from("deny"));
         assert_eq!(argv[2], OsString::from("-b"));
-        assert_eq!(argv[3], OsString::from("/:/ro"));
+        assert_eq!(argv[3], OsString::from("/:/:ro"));
         assert_eq!(argv[4..], os_argv(&["sh", "-c", "exit 42"])[..]);
     }
 
@@ -727,9 +804,12 @@ mod tests {
         assert!(bindings_of(&plan, workspace.path())
             .iter()
             .any(|binding| !binding.read_only));
-        assert!(bindings_of(&plan, &workspace.path().join(".git"))
-            .iter()
-            .any(|binding| binding.read_only));
+        // `.git` se enlaza contra sí misma: existe y su lectura está permitida, así que
+        // una máscara la ocultaría y el sandbox sería más estricto que el pedido.
+        let git = bindings_of(&plan, &workspace.path().join(".git"));
+        assert_eq!(git.len(), 1);
+        assert!(git[0].read_only);
+        assert_eq!(git[0].source, workspace.path().join(".git"));
         // `.codex` todavía no existe y aun así se enmascara: sin bind, el comando
         // podría crearlo y saltarse la aprobación de metadata.
         let masked_codex = bindings_of(&plan, &workspace.path().join(".codex"));
@@ -845,6 +925,75 @@ mod tests {
         assert_eq!(masked.len(), 1);
         assert!(masked[0].read_only);
         assert!(masked[0].source.starts_with("/tmp/mask-root"));
+    }
+
+    #[test]
+    fn a_denial_outside_every_writable_root_is_masked_too() {
+        // Con lectura de disco completa `get_unreadable_roots_with_cwd` descarta la
+        // entrada negada porque el propio camino la considera legible; si el wrapper se
+        // guiara solo por esa función, la ruta quedaría legible y el sandbox sería más
+        // amplio que lo pedido.
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("claves");
+        std::fs::create_dir_all(&secret).unwrap();
+        let json = format!(
+            r#"{{"type":"managed","file_system":{{"type":"restricted","entries":[
+                {{"path":{{"type":"special","value":{{"kind":"root"}}}},"access":"read"}},
+                {{"path":{{"type":"path","path":"{}"}},"access":"write"}},
+                {{"path":{{"type":"path","path":"{}"}},"access":"deny"}}
+            ]}},"network":"enabled"}}"#,
+            workspace.path().display(),
+            secret.display()
+        );
+        let profile: PermissionProfile = serde_json::from_str(&json).unwrap();
+
+        let plan = plan_for(&profile, workspace.path());
+        let masked = bindings_of(&plan, &secret);
+        assert_eq!(masked.len(), 1);
+        assert!(masked[0].read_only);
+        assert!(
+            masked[0].source.starts_with("/tmp/mask-root"),
+            "una negación de lectura existente se enmascara, no se autoenlaza: {:?}",
+            masked[0].source
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_denial_fails_closed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let json = r#"{"type":"managed","file_system":{"type":"restricted","entries":[
+            {"path":{"type":"special","value":{"kind":"root"}},"access":"read"},
+            {"path":{"type":"special","value":{"kind":"minimal"}},"access":"deny"}
+        ]},"network":"enabled"}"#;
+        let profile: PermissionProfile = serde_json::from_str(json).unwrap();
+
+        let error = build_plan(&profile, workspace.path(), Path::new("/tmp/mask-root"))
+            .expect_err("una negación sin ruta concreta no se puede enmascarar");
+        assert!(error.contains("no resoluble"), "{error}");
+    }
+
+    #[test]
+    fn a_root_read_denial_fails_closed_rather_than_masking_the_root() {
+        // Negar la lectura de `/` no tiene traducción a binds: enmascararla quitaría
+        // también el programa a ejecutar y no enmascararla dejaría legible todo lo
+        // negado. Puede detectarlo la puerta de allowlist (sin lectura raíz no hay
+        // plan posible) o la resolución de la negación; ambas fallan cerrado.
+        let workspace = tempfile::tempdir().unwrap();
+        let json = r#"{"type":"managed","file_system":{"type":"restricted","entries":[
+            {"path":{"type":"special","value":{"kind":"root"}},"access":"read"},
+            {"path":{"type":"special","value":{"kind":"project_roots"}},"access":"write"},
+            {"path":{"type":"special","value":{"kind":"root"}},"access":"deny"}
+        ]},"network":"enabled"}"#;
+        let profile: PermissionProfile = serde_json::from_str(json).unwrap();
+
+        let error = build_plan(&profile, workspace.path(), Path::new("/tmp/mask-root"))
+            .expect_err("la negación de la raíz no se expresa con binds");
+        assert!(
+            error.contains("restringe qué se puede leer")
+                || error.contains("no puede enmascarar la raíz"),
+            "{error}"
+        );
     }
 
     #[test]

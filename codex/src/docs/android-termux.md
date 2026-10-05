@@ -66,9 +66,16 @@ What the wrapper emits, all measured on the device:
 - `/dev` is bound read-only and the device nodes a shell needs (`/dev/null`,
   `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, `/dev/tty`) are reopened
   writable; `/dev` is not listable in the Termux runtime and the rest stays closed.
-- `-b <vacío>:<objetivo>:ro` masks content and blocks writes, and it works for
-  targets that do not exist yet, so `.git`, `.agents` and `.codex` carveouts hold
-  even against first-time creation.
+- A carveout whose reads the profile allows and whose path exists (`<ws>/.git`) is
+  bound against itself with `:ro`. Measured: that blocks write, unlink and rename
+  while the content stays readable, which is what git needs. Masking it with an
+  empty node instead would be stricter than the profile asks for.
+- A carveout whose reads are denied, and protected metadata that does not exist
+  yet (`<ws>/.codex`), is bound to an empty node. Measured: the mask blocks reading
+  the content, writing, creating the leaf, unlinking it and renaming it, and it
+  works for paths that are not there yet, so the `.git`/`.agents`/`.codex`
+  carveouts hold against first-time creation. A bind with a missing source aborts
+  `proot`, which is why the empty node is used.
 - `--net-policy deny` fails `connect`/`bind` with `EACCES` (loopback included).
 - `proot` rejects `--` as a separator, so the wrapped command follows the options
   directly; exit codes and argv arrive unmodified.
@@ -79,9 +86,12 @@ The honest limits:
   a boundary against deliberately malicious code. It is a real boundary against
   accidental writes and network use, which is what `sandbox_mode` can mean on an
   unrooted device.
+- A mask hides content, not the directory entry: `ls` and `du` still print the
+  masked name, they just cannot descend into it or read it.
 - Profiles that restrict *reads* to an allowlist are refused (building that view
   needs `-r` plus a rebuilt `/proc`, `$PREFIX` and the Termux symlinks), as are
-  `deny` rules expressed as glob patterns and managed network
+  `deny` rules expressed as glob patterns, a `deny` on the filesystem root itself
+  (masking `/` would also remove the program being run) and managed network
   (`--allow-network-for-proxy`), which the wrapper cannot express without the proxy
   path. Every one of these fails closed with exit 78 and never runs the command.
 - The native `codex-rs/linux-sandbox` (bubblewrap/Landlock/seccomp) is still not a
