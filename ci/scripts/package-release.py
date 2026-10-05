@@ -6,10 +6,7 @@ FILES = ["codex-android", "codex-code-mode-host", "codex-linux-sandbox"]
 PREFIX = "codex-android-aarch64-"
 
 def verify(path: pathlib.Path, name: str) -> None:
-    if name == "codex-linux-sandbox":
-        result = subprocess.run(["bash", "-n", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if result.returncode: raise SystemExit("codex-linux-sandbox: Bash inválido")
-        return
+    # codex-linux-sandbox dejó de ser un script: es el ELF del wrapper de proot.
     info = subprocess.check_output(["file", str(path)], text=True)
     if "ELF" not in info or not re.search(r"aarch64|ARM aarch64", info):
         raise SystemExit(f"{name}: no es un ELF aarch64 ({info.strip()})")

@@ -157,10 +157,7 @@ def validate_archive(path: pathlib.Path, kind: str, expected: list[str], out: pa
         if not (out / f).is_file() or (out / f).is_symlink(): fail(f"falta archivo esperado: {f}")
 
 def verify_file(path: pathlib.Path, component: str, name: str) -> None:
-    if name == "codex-linux-sandbox":
-        if subprocess.run(["bash", "-n", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode: fail("codex-linux-sandbox no es un script Bash válido")
-        return
-    if name.endswith(".so") or name in ("bun", "opencode", "kilo", "codex", "codex-android", "codex-code-mode-host"):
+    if name.endswith(".so") or name in ("bun", "opencode", "kilo", "codex", "codex-android", "codex-code-mode-host", "codex-linux-sandbox"):
         if os.environ.get("CODEX_INSTALL_TEST_MODE") == "1": return
         info = subprocess.check_output(["file", str(path)], text=True)
         if "ELF" not in info or not re.search(r"aarch64|ARM aarch64", info): fail(f"{component}: arquitectura ELF inválida en {name}")

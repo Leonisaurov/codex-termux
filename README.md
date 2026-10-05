@@ -17,8 +17,8 @@ Puerto Android/Termux de la CLI Codex (`codex-rs`), separado del stack
 
 ```
 codex/src            fuente upstream + parches del port (vendeoreada, pin en ci/source-manifest.json)
-codex/scripts        build-codex-android.sh, stub codex-linux-sandbox
-codex/test           pruebas de dispositivo (regresión de locks, relay ntfy)
+codex/scripts        build-codex-android.sh
+codex/test           harnesses de dispositivo (lock-regression, host-smoke, sandbox-proot)
 codex/more           relay ntfy de aprobaciones (TypeScript, corre con Bun)
 codex/build          estado generado por CI (ignorado)
 codex/artifacts      binarios producidos por CI (ignorados)
@@ -68,26 +68,34 @@ ese coste, hacerlo en `README.md` o en `ci/`.
 ```sh
 bash codex/test/lock-regression/run.sh "$PREFIX/bin/codex-android"
 bash codex/test/host-smoke/run.sh "$PREFIX/bin/codex-code-mode-host"
+bash codex/test/sandbox-proot/run.sh "$PREFIX/bin/codex-linux-sandbox"
 ```
 
 La primera arranca el `app-server` real contra un Responses API de juguete y
 verifica los parches de `File::lock` sobre un turno que ejecuta un comando; la
 persistencia de `rules/default.rules` solo se asevera si el server pidió una
-aprobación, y en Android no la pide porque no hay sandbox restrictivo. La segunda es
-lo que ningún chequeo de build puede probar: que el host sobrevive al loader
+aprobación, lo que en el modo por defecto no ocurre. Corriéndola con
+`SANDBOX_MODE=workspace-write` el turno pasa además por el wrapper de sandbox.
+La segunda es lo que ningún chequeo de build puede probar: que el host sobrevive al loader
 dinámico de Bionic y llega a `main()` (un `PT_TLS` mal alineado, un símbolo
 ausente o un archivo V8 incompatible matan el binario en el dispositivo, no en
-el runner).
+el runner). La tercera mide qué bloquea de verdad el sandbox en el dispositivo.
 
-## Limitación de sandbox
+## Sandbox
 
-En este pin los modos restrictivos (`read-only`, `workspace-write`) no pueden
-ejecutar comandos en Android: `arg0` solo inyecta la ruta del ejecutable de sandbox
-bajo `cfg!(target_os = "linux")` y esa clave no se fija desde TOML, así que cada
-comando aborta con `LandlockSandboxExecutableNotProvided`. El `codex-linux-sandbox`
-publicado es un stub diagnóstico (`exit 78`), no un wrapper de `proot`. En la práctica
-`codex` aquí corre sin sandbox; `codex/src/docs/android-termux.md` detalla qué haría
-falta para cerrar la brecha.
+`sandbox_mode=read-only` y `workspace-write` sí ejecutan comandos aquí: el puerto
+aporta `codex-rs/android-sandbox`, un `codex-linux-sandbox` propio que traduce el
+`--permission-profile` del manager de Codex a un arranque de `proot` de Termux
+(`-b /:/:ro` más reapertura de las raíces escribibles y `--net-policy deny`), y
+parchea `arg0` para que lo resuelva en Android. Falla cerrado: sin `proot`, con un
+perfil que restrinja lecturas, con negaciones por glob o con red gestionada, sale
+con 78 y no ejecuta nada.
+
+No es una frontera contra código deliberadamente malicioso — proot es `ptrace` y
+el trazado comparte UID con el trazador —; es una frontera real contra escrituras
+y usos accidentales de la red. El `linux-sandbox` nativo (bubblewrap/Landlock)
+sigue sin ser un sandbox de Android y no se compila aquí.
+`codex/src/docs/android-termux.md` detalla primitivas, límites y harnesses.
 
 ## Instalación en Termux
 

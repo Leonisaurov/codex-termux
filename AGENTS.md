@@ -6,7 +6,10 @@ This repository is the Android/Termux port of the Codex CLI, split out of the
 `opencode-termux` stack workspace. Everything Codex-related lives here:
 
 - `codex/src/`: vendored `openai/codex` monorepo plus the Android port patches.
-- `codex/scripts/`: the CI build entry point and the `codex-linux-sandbox` stub.
+- `codex/scripts/`: the CI build entry point (`build-codex-android.sh`).
+- `codex/src/codex-rs/android-sandbox/`: port-owned crate that ships as
+  `codex-linux-sandbox`; it translates a Codex permission profile into a `proot`
+  invocation and must fail closed rather than run a command unsandboxed.
 - `codex/test/`, `codex/more/`: device-side tests and the ntfy approval relay.
 - `codex/build/`, `codex/artifacts/`: CI-generated state (gitignored).
 - `ci/scripts/`: shared environment, resumable build-state engine, cache

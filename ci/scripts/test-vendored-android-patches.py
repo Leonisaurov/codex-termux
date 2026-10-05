@@ -11,6 +11,8 @@ MARKER = "CODEX-TERMUX-ANDROID-PATCH"
 REQUIRED = (
     "code-mode-host/src/main.rs",            # stub TLS alineado: sin él el host aborta
     "arg0/src/lib.rs",                        # flock no soportado (guard y janitor)
+    "android-sandbox/src/lib.rs",             # wrapper de sandbox sobre proot
+    "android-sandbox/src/main.rs",
     "execpolicy/src/amend.rs",
     "core/src/installation_id.rs",
     "core-plugins/src/startup_sync.rs",
@@ -24,7 +26,7 @@ REQUIRED = (
     "rmcp-client/src/oauth/store_lock.rs",
     "user-verification/src/lifecycle_lock.rs",
 )
-MIN_MARKERS = 29
+MIN_MARKERS = 33
 
 
 def main() -> None:
@@ -39,6 +41,18 @@ def main() -> None:
         path = RS / rel
         assert path.is_file(), f"ausente en el árbol vendeoreado: {rel}"
         assert MARKER in path.read_text(encoding="utf-8"), f"{rel}: falta el parche Android ({MARKER})"
+
+    # Cadena de selección del sandbox: sin ninguno de estos tres eslabones el producto
+    # se instala sin exe de sandbox y todo modo restrictivo muere en tiempo de ejecución
+    # con "codex-linux-sandbox was required but not provided".
+    workspace = (RS / "Cargo.toml").read_text(encoding="utf-8")
+    assert '"android-sandbox"' in workspace, "android-sandbox salió del workspace members"
+    arg0 = (RS / "arg0" / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert "android_sandbox_exe_path" in arg0, "arg0 ya no resuelve el wrapper en Android"
+    build = (ROOT / "codex" / "scripts" / "build-codex-android.sh").read_text(encoding="utf-8")
+    assert "--package codex-android-sandbox" in build, "el build ya no compila el wrapper"
+    stub = ROOT / "codex" / "scripts" / "codex-linux-sandbox"
+    assert not stub.exists(), f"{stub}: el stub de diagnóstico vuelve a tappear el ELF"
 
     total = sum(
         path.read_text(encoding="utf-8", errors="ignore").count(MARKER)

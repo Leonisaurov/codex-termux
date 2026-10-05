@@ -13,11 +13,12 @@
 #      answer really persisted `<CODEX_HOME>/rules/default.rules`;
 #   3. the command actually ran.
 #
-# Assertion 2 is conditional on purpose: on Android the restrictive sandboxes
-# cannot run at all (the sandbox executable only reaches the config under
-# cfg!(target_os = "linux"), arg0/src/lib.rs:261), so no denial is produced and no
-# escalation prompt appears. If a working wrapper ever replaces the shipped stub,
-# this harness starts covering the rules write without further edits.
+# Assertion 2 is conditional on purpose: in the default mode the app-server never
+# denies a command, so no escalation prompt appears and the rules write stays out of
+# reach. Set SANDBOX_MODE=workspace-write (or read-only) to run the turn through the
+# proot wrapper instead; that is the mode in which the sandbox produces denials, and
+# it also enables the extra assertion below that proves the real turn went through
+# codex-linux-sandbox rather than merely through a binary that exists.
 set -euo pipefail
 
 CODEX_BIN="${1:-${CODEX_BIN:-}}"
@@ -32,6 +33,12 @@ TMPDIR="${TMPDIR:-/data/data/com.termux/files/usr/tmp}"
 WORK="$(mktemp -d "$TMPDIR/codex-lock-regression.XXXXXX")"
 CODEX_HOME="$WORK/codex-home"
 mkdir -p "$CODEX_HOME"
+
+SANDBOX_MODE="${SANDBOX_MODE:-danger-full-access}"
+export SANDBOX_MODE
+# El wrapper anota cada invocación en este archivo: es la evidencia de que el turno
+# real pasó por proot, no de que el binario del sandbox exista en el árbol instalado.
+export CODEX_ANDROID_SANDBOX_LOG="$WORK/sandbox-calls.jsonl"
 
 SERVER_PID=""
 cleanup() {
@@ -67,6 +74,19 @@ else
     echo "ok: no 'lock() not supported' in the app-server run"
 fi
 
+if [ "$SANDBOX_MODE" = "danger-full-access" ]; then
+    echo "skip: modo $SANDBOX_MODE; SANDBOX_MODE=workspace-write ejercita el wrapper de proot"
+else
+    if grep -q "was required but not provided" "$WORK/probe.log"; then
+        fail "el modo $SANDBOX_MODE no resolvió el exe de sandbox (arg0 no lo inyectó)"
+    elif [ -s "$CODEX_ANDROID_SANDBOX_LOG" ] && grep -q '"proot_argv"' "$CODEX_ANDROID_SANDBOX_LOG"; then
+        echo "ok: el turno pasó por el wrapper de proot ($(wc -l < "$CODEX_ANDROID_SANDBOX_LOG") invocaciones)"
+    else
+        fail "modo $SANDBOX_MODE: no hay registro de que el wrapper se invocó"
+        sed -n '1,60p' "$WORK/probe.log" >&2 || true
+    fi
+fi
+
 RULES="$CODEX_HOME/rules/default.rules"
 if grep -q "requestApproval" "$WORK/probe.log"; then
     if [ -s "$RULES" ] && grep -q 'decision="allow"' "$RULES"; then
@@ -76,9 +96,9 @@ if grep -q "requestApproval" "$WORK/probe.log"; then
         sed -n '1,80p' "$WORK/probe.log" >&2 || true
     fi
 else
-    # Sin sandbox no hay denegación que escalar, así que el app-server nunca pide
-    # aprobación y la escritura de reglas queda fuera de alcance en este pin/mode.
-    echo "skip: rules/default.rules no alcanzable (nada pidió aprobación; el sandbox restrictivo no existe en Android)"
+    # Sin denegación no hay nada que escalar, así que el app-server nunca pide
+    # aprobación y la escritura de reglas queda fuera de alcance en este modo.
+    echo "skip: rules/default.rules no alcanzable (nada pidió aprobación en modo $SANDBOX_MODE)"
 fi
 
 if [ -s "$WORK/approved.txt" ]; then

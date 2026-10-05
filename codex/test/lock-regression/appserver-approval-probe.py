@@ -26,13 +26,16 @@ cfg = [
     "-c", "model=fake-model",
     # CODEX-TERMUX-ANDROID-PATCH: upstream 0.155.1 rechaza approval_policy="untrusted" en
     # cualquier config validada (app-server/src/config_manager_service.rs:validate_config),
-    # fijarla mata el arranque del app-server. Y en Android ningún modo restrictivo puede
-    # ejecutarse: el exe de sandbox lo provee arg0 solo bajo cfg!(target_os = "linux")
-    # (arg0/src/lib.rs:261), así que read-only/workspace-write abortan con
-    # LandlockSandboxExecutableNotProvided antes de pedir aprobación. Queda
-    # danger-full-access, que es el modo en que este puerto realmente corre comandos; lo que
-    # se ejercita aquí son los caminos de lock del arranque y del turno, no la escalada.
-    "-c", "sandbox_mode=danger-full-access",
+    # fijarla mata el arranque del app-server.
+    #
+    # El modo viene de SANDBOX_MODE y por defecto es danger-full-access: así este probe
+    # sigue cubriendo los caminos de lock del arranque y del turno tal como los cubría
+    # antes de que existiera el wrapper de proot (que en Android es lo que permite
+    # correr read-only/workspace-write, ya que arg0 solo inyecta el exe de sandbox bajo
+    # cfg!(target_os = "linux") en upstream). Con SANDBOX_MODE=workspace-write el mismo
+    # probe ejercita el wrapper real: la denegación del sandbox es la que produce la
+    # escalada, y por lo tanto la escritura de rules/default.rules.
+    "-c", f"sandbox_mode={SANDBOX_MODE}",
     "-c", "analytics.enabled=false",
     "-c", "hide_agent_reasoning=true",
 ]

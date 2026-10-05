@@ -236,3 +236,66 @@ sobre `proot`.
 `arg0`), con sus assets. Los tags siguen apuntando a `fc9f366` y `3937e52`, así que
 cada release es recreable si hiciera falta. Publicados quedan solo
 `codex-v0.155.1-2` (latest) y el espejo `rusty-v8-v150.4.0`.
+
+## Wrapper de sandbox sobre `proot` (2026-10-04)
+
+Se cierra la brecha que `PROGRESS.md` dejaba abierta a propósito. Antes de escribir
+código se midió en el dispositivo qué primitives hay: Landlock no (kernel 5.10 y la
+syscall 444 muere por seccomp), `unshare(CLONE_NEWUSER|CLONE_NEWNS)` → `EINVAL`, sin
+`bwrap`; lo único que existe es `proot` de Termux (`5.1.107.96-0`). Cada afirmación del
+wrapper sale de esa medición, no de la documentación de proot:
+
+- `-b /:/:ro` produce `EROFS` en cualquier `openat` con escritura; un `-b <raíz>:<raíz>`
+  posterior reabre la escritura y un `-b <sub>:<sub>:ro` la vuelve a cerrar.
+- `-b <vacío>:<objetivo>:ro` oculta contenido **e impide crear** el objetivo aunque el
+  objetivo todavía no exista — medido, porque es lo que hace falta para que `.git` /
+  `.codex` / `.agents` no se puedan fabricar.
+- `--net-policy deny` falla `connect` con `EACCES` también en loopback; no afecta a
+  `getaddrinfo` ni a `bind` (no hace falta aquí, pero acota qué se está prometiendo).
+- proot **rechaza `--`** como separador, así que el comando va suelto al final; códigos
+  de salida y argv con espacios llegan intactos.
+- `/dev` no es listable en el runtime de Termux: se monta `:ro` y se reabren solo
+  `null`, `zero`, `full`, `random`, `urandom`, `tty`. Un `/` read-only sin esa reapertura
+  rompe `git` (`could not open '/dev/null'`), que fue el fallo de la primera versión.
+
+Lo que se cableó:
+
+- `codex-rs/android-sandbox`, crate propio que se publica como binario
+  `codex-linux-sandbox`. Parsea el contrato real del manager
+  (`--sandbox-policy-cwd`, `--command-cwd`, `--permission-profile` JSON,
+  `--use-legacy-landlock`, `--allow-network-for-proxy`) con **flag desconocido = error**,
+  y traduce el `PermissionProfile` tipado (no JSON a mano) a los binds de arriba.
+- `arg0/src/lib.rs`: rama `cfg!(target_os = "android")` que resuelve el wrapper hermana
+  al ejecutable y, si no la encuentra, deja `None` para que siga el error de upstream en
+  vez de correr sin sandbox.
+- Todo lo no expresable falla cerrado con 78 y no ejecuta nada: sin `proot`, perfil con
+  allowlist de lecturas, negaciones por glob, red gestionada. Y hay sonda previa: si el
+  `proot` del sistema acepta `:ro` pero no lo aplica, o no virtualiza máscaras sobre
+  rutas inexistentes, el wrapper aborta en vez de servir un sandbox decorativo.
+- Se borró el stub diagnóstico `codex/scripts/codex-linux-sandbox`; `build-codex-android.sh`
+  compila `--package codex-android-sandbox`, instala su ELF y le pasa
+  `verify_tls_alignment`; `installer.py` y `package-release.py` lo validan como ELF (era
+  `bash -n`).
+- `ci/scripts/test-vendored-android-patches.py` sube a 16 archivos y 33 marcadores y
+  añade la guarda de la cadena de selección (miembro del workspace, rama de `arg0`,
+  `--package` en el build, stub ausente).
+- `build-codex.yml` corre `cargo test -p codex-android-sandbox` **antes** del build largo,
+  bajo la misma condición que el build: tocar `android-sandbox` mueve
+  `CODEX_SOURCE_TREE`, así que un cache-hit implica que esos tests ya pasaron con ese
+  árbol.
+
+Todavía no verificado, y es el gate para dar esto por bueno: el ELF del crate no corrió
+en el dispositivo. El harness nuevo (`codex/test/sandbox-proot/run.sh`, 32 aserciones de
+argv, enforcement y fail-closed) pasó entero **contra un shim de shell** que emite el
+mismo argv — eso prueba las primitivas de proot y la plomería del harness, no la
+traducción perfil→binds, que es justo lo que validan los unit tests en CI. Pasos
+pendientes: build verde en CI, `bash codex/test/sandbox-proot/run.sh
+$PREFIX/bin/codex-linux-sandbox` con el ELF real, y `SANDBOX_MODE=workspace-write
+codex/test/lock-regression/run.sh` para confirmar que un turno real de `codex` pasa por
+el wrapper (ese modo además hace alcanzable la escritura de `rules/default.rules`, que
+hasta ahora siempre informaba `skip`).
+
+Postura documentada en `README.md` y `codex/src/docs/android-termux.md`: proot es
+`ptrace` con UID compartido, así que esto **no** es frontera contra código
+deliberadamente malicioso; es frontera real contra escrituras y red accidentales, que
+es lo que `sandbox_mode` puede significar en un dispositivo sin root.
