@@ -1,4 +1,4 @@
-# Progreso actual — 2026-10-04
+# Progreso actual — 2026-10-05
 
 Repositorio creado al extraer Codex del stack `opencode-termux`. El árbol
 `codex/src` es byte-idéntico al del commit `12d2c97` de ese repositorio, y su
@@ -445,10 +445,25 @@ La simulación también encontró dos defectos propios del script (un `digest = 
 que tomaba la palabra `tree` en vez del SHA, y un newline comido por una edición), ambos
 corregidos antes de subir nada.
 
-## Pendiente de esta tarea
+## Evidencia del auto-publish: CI, release y dispositivo (2026-10-05)
 
-- CI en rama con `dry_run=true` (evidencia de `contracts` y del paso `decision` en runner).
-- Merge a `main` ⇒ debe publicar `0.155.1-3` solo; luego un dispatch inmediato esperado
-  `source-unchanged`.
-- `install.sh` + los tres harnesses contra `$PREFIX/bin/*` con ese release.
-- La cobertura que sigue sin hacerse: `rules/default.rules` con `require_escalated`.
+Escalera completa, cada paso con el log o el manifest leídos.
+
+| Paso | Evidencia |
+|---|---|
+| Decision en rama, sin tocar estado compartido | run `37280930614` (`ci/auto-publish`, `dry_run=true`) verde: `contracts` con los 7 tests, y el paso *decision* imprimiendo `tag=codex-v0.155.1-3`, `publish=false`, `reason=dry-run`. `git ls-remote --tags` después: sigue en 3 tags, ninguno `-3`. |
+| Merge y publicación sola | PR #1 → `main` = `fb70974`. El run del **push** `37306688863` quedó verde y creó `codex-v0.155.1-3` sin que nadie lo disparara. |
+| Identidad publicada | `gh release download codex-v0.155.1-3 -p manifest.json`: `release 0.155.1-3`, `schema codex-termux/v1`, `components.codex.source = {commit: be2951ea…, tree: 11f235d15ee85dc7f177371ba5cd26f9fdfcc640}`, asset de `393321319` B con `sha256 8bd426abf4556640dc9946cb295ac98cec2c449ab170ba139486325354521c6d`. El tag apunta a `fb70974`, igual que `refs/heads/main`. |
+| Idempotencia (el criterio pedido) | dispatch inmediato `37309471109` sobre el mismo árbol ⇒ `newest_tag=codex-v0.155.1-3`, `publish=false`, `reason=source-unchanged`; el repo sigue con 4 tags y 2 releases `codex-v…`. No se creó ni modificó nada. |
+| Dispositivo | `install.sh --yes` ⇒ `Instalación completa: archivos, checksum y arquitectura validados` (rc=0) con `codex be2951ea…`. En `$PREFIX/bin`: `codex-android` 1 429 809 064 B, `codex-code-mode-host` 215 231 672 B, `codex-linux-sandbox` 43 357 720 B. `codex-android --version` ⇒ `codex-cli 0.155.1`. |
+| Harnesses contra los ELF instalados | `sandbox-proot` **PASS** (37 aserciones); `host-smoke` **OK** rc=0; `lock-regression` default **PASS**; `lock-regression` en `workspace-write` **PASS** con `el turno pasó por el wrapper de proot (208 invocaciones)`. 44 aserciones `ok:` en total, rc=0 en las cuatro corridas. |
+
+Lo que se probaba con esto no es "el binario existe": es que un push que cambia
+`git ls-tree HEAD codex/src` publica y un push que no lo cambia no publica, y que la
+decisión que toma el runner es la misma que tomó el simulador local sobre el ladder.
+
+Cobertura que sigue sin hacerse (no es un fallo conocido del port): escribir
+`rules/default.rules` sigue sin ejercitarse; los harnesses informan `skip` porque nada
+pide aprobación en `workspace-write` con `approval_policy` por defecto. Hace falta que el
+`tool call` del servidor fake pida `sandbox_permissions: "require_escalated"` (o una
+política `granular`).
