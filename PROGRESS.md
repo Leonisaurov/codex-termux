@@ -347,3 +347,53 @@ Sigue sin validar con el ELF real, y ese es el gate: correr el harness contra
 `$PREFIX/bin/codex-linux-sandbox` y `SANDBOX_MODE=workspace-write
 codex/test/lock-regression/run.sh`. Hasta entonces lo probado es la semántica de proot y
 la plomería del harness, no el binario instalado.
+
+## El ELF real en el dispositivo: verde, y dos defectos del harness que solo aparecieron ahí (2026-10-05)
+
+La run `37263534411` (`31f893f`) quedó verde leyendo el log: `contracts`, `rusty-v8`
+restaurado desde el release espejado, `codex` con `Test Android sandbox wrapper` →
+`test result: ok. 15 passed; 0 failed` y `Upload Codex binaries`. Con los binarios de esa
+run (`codex-android-aarch64-be2951ea…`, descargados y borrados después; el artifact son
+1.6 G descomprimidos porque viaja sin strip) se corrieron los cuatro harnesses:
+
+- `codex/test/sandbox-proot/run.sh <codex-linux-sandbox>` ⇒ **PASS, 37 aserciones**. El
+  argv del binario real coincide con el del shim: máscara con fuente vacía para la
+  entrada `deny`, self-bind `:ro` para `.git`, fail-closed 78 en los tres perfiles
+  inexpressables, red bloqueada con `network=restricted` y disponible con `enabled`.
+- `SANDBOX_MODE=workspace-write … lock-regression/run.sh <codex-android>` ⇒ **PASS** con
+  `el turno pasó por el wrapper de proot (95 invocaciones)`: un turno real de `app-server`
+  ejecuta a través del wrapper, no "existe el binario y ya".
+- `SANDBOX_MODE=read-only` ⇒ **PASS**: el turno pasó por el wrapper y la escritura quedó
+  denegada.
+- modo default (`danger-full-access`) ⇒ **PASS**; `host-smoke` con `codex-code-mode-host`
+  ⇒ **OK**. El ELF del wrapper no tiene segmento TLS (nada que alinear: no enlaza
+  `rusty_v8`).
+
+Dos defectos eran del **harness** y eran invisibles mientras el probe no corriera:
+
+1. `appserver-approval-probe.py:38` interpolaba `SANDBOX_MODE` como nombre de Python que
+   nunca se definió → `NameError` antes de levantar el app-server. `run.sh` invoca el
+   probe con `|| true`, así que en el modo default el crash se leía como "nada pidió
+   aprobación" y las aserciones del turno real fallaban sin ruido. Se pasa por el entorno.
+2. El app-server heredaba el cwd del shell que lanza el harness, y ese cwd es la **raíz
+   escribible del sandbox**: corrido desde el repo, `workspace-write` le daba escritura
+   sobre la propia fuente. El turno se fija ahora al directorio efímero del harness.
+
+Y una causa raíz de producto/documentación que el harness describía mal: el
+`rules/default.rules` que siempre informaba `skip` **no** es que falte una denegación. En
+`read-only` la denegación ocurre y aun así no hay escalada, porque con
+`approval_policy` por defecto (`on-request`) upstream no reintenta sin sandbox:
+`core/src/tools/orchestrator.rs` devuelve la denegación como fallo del tool cuando
+`wants_no_sandbox_approval` es falso, y eso solo es `true` bajo `unless-trusted` o
+`granular.sandbox_approval` (`core/src/tools/sandboxing.rs:330`). La aserción final del
+harness ahora es consciente del modo: en `read-only` la ausencia del archivo es el
+resultado correcto.
+
+Queda como cobertura no hecha (no como fallo): escribir la regla de "no preguntar de
+nuevo" sigue sin ejercitarse en el dispositivo. Para llegar hace falta que el `tool call`
+del servidor fake pida `sandbox_permissions: "require_escalated"` (o una política
+`granular`), que es el camino real por el que un usuario aprueba una escalada.
+
+Borrado el gate: el wrapper está validado con el binario instalado, no con un shim. Lo
+que falta es publicarlo (`0.155.1-3`) y confirmar `install.sh` + los mismos harnesses
+contra `$PREFIX/bin/codex-linux-sandbox`.

@@ -74,8 +74,11 @@ bash codex/test/sandbox-proot/run.sh "$PREFIX/bin/codex-linux-sandbox"
 La primera arranca el `app-server` real contra un Responses API de juguete y
 verifica los parches de `File::lock` sobre un turno que ejecuta un comando; la
 persistencia de `rules/default.rules` solo se asevera si el server pidió una
-aprobación, lo que en el modo por defecto no ocurre. Corriéndola con
-`SANDBOX_MODE=workspace-write` el turno pasa además por el wrapper de sandbox.
+aprobación, y medido: nunca pide una, porque con `approval_policy=on-request`
+una denegación del sandbox no se reejecuta sin sandbox. Corriéndola con
+`SANDBOX_MODE=workspace-write` o `read-only` el turno pasa además por el
+wrapper de sandbox (se exige el registro en `CODEX_ANDROID_SANDBOX_LOG`) y en
+`read-only` se asevera que la escritura denegada no ocurrió.
 La segunda es lo que ningún chequeo de build puede probar: que el host sobrevive al loader
 dinámico de Bionic y llega a `main()` (un `PT_TLS` mal alineado, un símbolo
 ausente o un archivo V8 incompatible matan el binario en el dispositivo, no en

@@ -61,7 +61,10 @@ for _ in $(seq 1 50); do
 done
 
 echo "== codex-lock-regression: $CODEX_BIN"
-python3 "$HERE/appserver-approval-probe.py" "$CODEX_BIN" "$CODEX_HOME" "$PORT" '["echo"]' \
+# El app-server hereda el cwd y ese cwd es la raíz del workspace del sandbox: corrido
+# desde el repo, un modo escribible le daría escritura sobre la propia fuente. Se fija
+# el workspace al directorio efímero del harness.
+(cd "$WORK" && python3 "$HERE/appserver-approval-probe.py" "$CODEX_BIN" "$CODEX_HOME" "$PORT" '["echo"]') \
     >"$WORK/probe.log" 2>&1 || true
 
 STATUS=0
@@ -96,12 +99,24 @@ if grep -q "requestApproval" "$WORK/probe.log"; then
         sed -n '1,80p' "$WORK/probe.log" >&2 || true
     fi
 else
-    # Sin denegación no hay nada que escalar, así que el app-server nunca pide
-    # aprobación y la escritura de reglas queda fuera de alcance en este modo.
+    # Con `approval_policy` por defecto (`on-request`) upstream **no** reintenta sin
+    # sandbox tras una denegación: la devuelve como fallo del tool (core/src/tools/
+    # orchestrator.rs; `wants_no_sandbox_approval` es true solo bajo `unless-trusted` o
+    # `granular.sandbox_approval`). Sin pedido de aprobación no hay regla que persistir.
     echo "skip: rules/default.rules no alcanzable (nada pidió aprobación en modo $SANDBOX_MODE)"
 fi
 
-if [ -s "$WORK/approved.txt" ]; then
+if [ "$SANDBOX_MODE" = "read-only" ]; then
+    # En read-only ninguna escritura está permitida, así que la ausencia del archivo es
+    # el resultado correcto: solo debería existir si una escalada aprobada reejecutó el
+    # comando sin sandbox.
+    if [ -s "$WORK/approved.txt" ]; then
+        echo "ok: el comando se reejecutó tras aprobar la escalada -> $(cat "$WORK/approved.txt")"
+    else
+        echo "ok: read-only denegó la escritura (sin escalada: con approval_policy=on-request \
+upstream no reintenta sin sandbox, core/src/tools/orchestrator.rs)"
+    fi
+elif [ -s "$WORK/approved.txt" ]; then
     echo "ok: approved command executed -> $(cat "$WORK/approved.txt")"
 else
     fail "the approved command did not run"

@@ -143,11 +143,18 @@ bash codex/test/lock-regression/run.sh /path/to/codex-android
 The harness boots the real app-server against a scripted Responses API stand-in
 and fails if the binary reports `lock() not supported` or if the turn's command
 does not run. The `rules/default.rules` write is asserted only when the
-app-server actually asks for an approval; in the default `danger-full-access`
-mode nothing denies a command, so that assertion reports `skip` instead of passing
-silently. Under `SANDBOX_MODE=workspace-write` the proot wrapper does deny writes
-outside the workspace, which is the path where an approval — and the rules write —
-become reachable.
+app-server actually asks for an approval, and measured on the device it never
+does: in `danger-full-access` nothing denies a command, and under
+`SANDBOX_MODE=workspace-write`/`read-only` the proot wrapper does deny the write
+but the default `approval_policy=on-request` does not re-run a denied command
+unsandboxed (`core/src/tools/orchestrator.rs`; `wants_no_sandbox_approval` is
+true only under `unless-trusted` or `granular.sandbox_approval`,
+`core/src/tools/sandboxing.rs:330`). That assertion therefore reports `skip`,
+and reaching it needs a scripted call that asks for escalation
+(`sandbox_permissions: "require_escalated"`) — the path a real user takes when
+approving a denial. The wrapper side of the same turn is asserted, not
+assumed: `CODEX_ANDROID_SANDBOX_LOG` must show the proot argv, and in
+`read-only` the harness asserts the denied write did *not* happen.
 
 ## TLS segment alignment
 
