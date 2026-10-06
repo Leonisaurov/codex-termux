@@ -462,6 +462,12 @@ Lo que se probaba con esto no es "el binario existe": es que un push que cambia
 `git ls-tree HEAD codex/src` publica y un push que no lo cambia no publica, y que la
 decisión que toma el runner es la misma que tomó el simulador local sobre el ladder.
 
+Y un escalón más abajo: el push `83924a1` (solo `PROGRESS.md` en la raíz) no disparó
+**ninguna** corrida, porque el trigger tiene `paths: codex/**, ci/**, releases/**,
+.github/workflows/**`. Una docs de raíz no gasta build ni toca releases; el camino
+"compila por cache y no publica" es el de un push que toca `ci/**` (o `codex/more`,
+`codex/test`) sin cambiar `codex/src`.
+
 Cobertura que sigue sin hacerse (no es un fallo conocido del port): escribir
 `rules/default.rules` sigue sin ejercitarse; los harnesses informan `skip` porque nada
 pide aprobación en `workspace-write` con `approval_policy` por defecto. Hace falta que el
