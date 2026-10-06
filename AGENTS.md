@@ -37,7 +37,8 @@ This workspace is not a local build runner: no `cargo`, NDK or V8 compilation on
 the device. Use GitHub Actions for builds and validate statically here:
 
 ```sh
-for t in test-workflow-cache-contracts test-build-state test-ci-summary test-installer; do
+for t in test-workflow-cache-contracts test-release-decision \
+         test-vendored-android-patches test-build-state test-ci-summary test-installer; do
   python3 "ci/scripts/$t.py"
 done
 bash -n ci/scripts/*.sh codex/scripts/*.sh codex/test/lock-regression/run.sh

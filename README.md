@@ -42,20 +42,27 @@ gh run watch <RUN_ID> -R Leonisaurov/codex-termux --exit-status
 con el árbol que figura en el manifest del último release `codex-v<base>…`, y solo
 si son distintos emite una release nueva con el siguiente sufijo del ladder
 (`codex-v0.155.1-3`, `-4`, …). Un push a `main` que no tocó `codex/src` —por ejemplo
-un cambio en `ci/`— compila por cache y no publica nada.
+un cambio en `ci/`— compila por cache y no publica nada, y un cambio en estas notas de
+la raíz ni siquiera dispara la corrida: el trigger de `push` filtra por `codex/**`,
+`ci/**`, `releases/**` y `.github/workflows/**`.
 
 ```sh
-# Reempaqueta y publica la fuente actual sin esperas de build:
+# Decide y construye sin escribir releases (dry_run=true es el default):
 gh workflow run build.yml -R Leonisaurov/codex-termux --ref main \
   -f codex_ref=be2951ea34f0d295ed0becf97079f92fa5f6950e -f v8_version=150.4.0
-# Solo qué decidiría el pipeline, sin escribir releases:
-gh workflow run build.yml -R Leonisaurov/codex-termux --ref main -f dry_run=true
+# Aplica la decision, es decir publica si el arbol cambio o reescribe el tag cuyo
+# release quedo ausente o sin manifest:
+gh workflow run build.yml -R Leonisaurov/codex-termux --ref main \
+  -f codex_ref=be2951ea34f0d295ed0becf97079f92fa5f6950e -f v8_version=150.4.0 \
+  -f dry_run=false
 ```
 
 `release` es un override opcional de la versión base del tag; por defecto se lee de
 `[workspace.package] version` en `codex/src/codex-rs/Cargo.toml`. La identidad publicada
 viaja en `components.codex.source` del manifest, y un release ya publicado nunca se
 sobrescribe: lo que se reescribe es un tag cuyo release quedó ausente o sin manifest.
+No existe un "publicar igualmente": si el árbol ya está publicado, cualquier corrida con
+`dry_run=false` decide `source-unchanged` y no toca releases.
 
 Chequeos estáticos, sin runner:
 
@@ -72,8 +79,9 @@ son `ENGINE_PATHS` del contrato.
 
 El contrato del producto hashea el árbol `codex/src` completo —no solo
 `codex-rs`—, así que hasta un comentario en `codex/src/docs` cambia la clave y
-fuerza una recompilación desde cero. Para probar un cambio de docs sin pagar
-ese coste, hacerlo en `README.md` o en `ci/`.
+fuerza una recompilación desde cero. Para anotar algo sin tocar esa clave, escribirlo
+en `README.md`, `AGENTS.md` o `PROGRESS.md`: además, como el trigger filtra por
+directorios, un commit de solo esas notas de la raíz no corre nada.
 
 ## Pruebas en dispositivo
 
